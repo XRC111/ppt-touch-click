@@ -111,7 +111,7 @@ jobs:
           }
 "@
           Add-Type -TypeDefinition $src
-          [Pd]::Probe($dll)
+          [Pd]::Probe("$PWD/dist/PptSlideProc.x64.dll")
           Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
         continue-on-error: true
 
