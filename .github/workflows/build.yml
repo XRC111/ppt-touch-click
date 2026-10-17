@@ -73,36 +73,23 @@ jobs:
       - name: Native self-test (PowerShell 5.1)
         shell: powershell
         run: |
-          # 先手工写入每个用户的 COM 注册（regsvr32 在 CI 上偶尔不可用）
-          $reg = "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}"
-          New-Item -Path "$reg\InprocServer32" -Force | Out-Null
-          New-ItemProperty -Path $reg -Name "(default)" -Value "PptTouchClick SlideWatcher" -PropertyType String -Force | Out-Null
-          New-ItemProperty -Path "$reg\InprocServer32" -Name "(default)" -Value "$PWD\dist\PptSlideProc.x64.dll" -PropertyType String -Force | Out-Null
-          New-ItemProperty -Path "$reg\InprocServer32" -Name "ThreadingModel" -Value "Both" -PropertyType String -Force | Out-Null
-          New-Item -Path "HKCU:\Software\Classes\PptTouchClick.SlideWatcher\CLSID" -Force | Out-Null
-          New-ItemProperty -Path "HKCU:\Software\Classes\PptTouchClick.SlideWatcher\CLSID" -Name "(default)" -Value "{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}" -PropertyType String -Force | Out-Null
+          # 1) 直接调用导出的 DllGetClassObject / DllCanUnloadNow（CoreCLR 对无 TypeLib 的 IDispatch-only 组件会拒绝 CoCreate）
+          Add-Type -Path "$PWD\src\ComProbe.cs"
+          $probe = [ComProbe]::Run("$PWD\dist\PptSlideProc.x64.dll")
+          Write-Host $probe
+          if ($probe -notmatch "DllGetClassObject=0x00000000") { throw "DllGetClassObject failed: $probe" }
 
-          # 再用真正的 regsvr32 走一遍（同时验证 DllRegisterServer），失败只提示不中断
+          # 2) 安装路径：走 regsvr32 /i:user（按用户注册，DllRegisterServer）
           & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
           Write-Host "regsvr32 exit=$LASTEXITCODE"
+          $reg = "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
+          if (-not (Test-Path $reg)) { throw "COM class was not registered (regsvr32 failed)" }
+          "InprocServer32=" + (Get-ItemProperty $reg).'(default)'
 
-          # ---- 诊断：先手动 LoadLibrary（COM 自身加载失败时不会有别的提示）----
-          Add-Type -Path "$PWD\src\ComProbe.cs"
-          [ComProbe]::Run("$PWD\dist\PptSlideProc.x64.dll")
-          # ---- 诊断结束 ----
-
-          $type = [type]::GetTypeFromProgID("PptTouchClick.SlideWatcher", $true)
-          $w = [Activator]::CreateInstance($type)
-          $flags = [Reflection.BindingFlags]::InvokeMethod
-          "start="  + $type.InvokeMember("Start", $flags, $null, $w, $null)
-          "status=" + $type.InvokeMember("GetStatus", $flags, $null, $w, $null)
-          "stop="   + $type.InvokeMember("Stop", $flags, $null, $w, $null)
-          [Runtime.InteropServices.Marshal]::FinalReleaseComObject($w) | Out-Null
+          # 3) 组件日志：应能看到 loaded / Start / hook
           Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
 
           & regsvr32 /s /u "$PWD\dist\PptSlideProc.x64.dll" /i:user
-          Remove-Item "HKCU:\Software\Classes\PptTouchClick.SlideWatcher" -Recurse -Force
-          Remove-Item "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}" -Recurse -Force
       # ---------------------------------------------------------------- 打包
       - name: Package
         shell: pwsh
