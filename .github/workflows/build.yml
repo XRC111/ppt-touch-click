@@ -30,6 +30,21 @@ jobs:
           Get-Item dist\PptTouchClick.exe | Format-List Name,Length
 
       # ---------------------------------------------------------------- 原生组件 (MSVC)
+      # ---------------------------------------------------------------- 类型库（注册用；已随仓库提供，能生成时以生成结果为准）
+      - name: Make type library
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $sdk = 'C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8.1 Tools'
+          $tlbexp = Get-ChildItem $sdk -Recurse -Filter tlbexp.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($tlbexp) {
+            & $tlbexp.FullName src\PptSlideProc.TlbGen.dll /out:dist\PptSlideProc.tlb
+          }
+          if (-not (Test-Path dist\PptSlideProc.tlb)) {
+            Write-Host "tlbexp 不可用，使用仓库内预生成的 src\PptSlideProc.tlb"
+            Copy-Item src\PptSlideProc.tlb dist\PptSlideProc.tlb
+          }
+          Get-Item dist\PptSlideProc.tlb | Format-List Name,Length
       - name: Setup MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1
         with:
