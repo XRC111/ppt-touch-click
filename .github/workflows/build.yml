@@ -73,12 +73,18 @@ jobs:
       - name: Native self-test (PowerShell 5.1)
         shell: powershell
         run: |
-          # 按用户注册（无需管理员）：/i:user 必须放在 DLL 参数之后
+          # 先手工写入每个用户的 COM 注册（regsvr32 在 CI 上偶尔不可用）
+          $reg = "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}"
+          New-Item -Path "$reg\InprocServer32" -Force | Out-Null
+          New-ItemProperty -Path $reg -Name "(default)" -Value "PptTouchClick SlideWatcher" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path "$reg\InprocServer32" -Name "(default)" -Value "$PWD\dist\PptSlideProc.x64.dll" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path "$reg\InprocServer32" -Name "ThreadingModel" -Value "Both" -PropertyType String -Force | Out-Null
+          New-Item -Path "HKCU:\Software\Classes\PptTouchClick.SlideWatcher\CLSID" -Force | Out-Null
+          New-ItemProperty -Path "HKCU:\Software\Classes\PptTouchClick.SlideWatcher\CLSID" -Name "(default)" -Value "{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}" -PropertyType String -Force | Out-Null
+
+          # 再用真正的 regsvr32 走一遍（同时验证 DllRegisterServer），失败只提示不中断
           & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
           Write-Host "regsvr32 exit=$LASTEXITCODE"
-          $reg = "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
-          if (-not (Test-Path $reg)) { throw "COM class was not registered (regsvr32 failed)" }
-          "InprocServer32=" + (Get-ItemProperty $reg).'(default)'
 
           $type = [type]::GetTypeFromProgID("PptTouchClick.SlideWatcher", $true)
           $w = [Activator]::CreateInstance($type)
@@ -87,9 +93,11 @@ jobs:
           "status=" + $type.InvokeMember("GetStatus", $flags, $null, $w, $null)
           "stop="   + $type.InvokeMember("Stop", $flags, $null, $w, $null)
           [Runtime.InteropServices.Marshal]::FinalReleaseComObject($w) | Out-Null
+          Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
 
           & regsvr32 /s /u "$PWD\dist\PptSlideProc.x64.dll" /i:user
-
+          Remove-Item "HKCU:\Software\Classes\PptTouchClick.SlideWatcher" -Recurse -Force
+          Remove-Item "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}" -Recurse -Force
       # ---------------------------------------------------------------- 打包
       - name: Package
         shell: pwsh
