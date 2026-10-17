@@ -94,7 +94,7 @@ jobs:
         shell: powershell
         run: |
           $dll = "$PWD\dist\PptSlideProc.x64.dll"
-          Add-Type -TypeDefinition @"
+          $src = @"
           using System;
           using System.Runtime.InteropServices;
           public static class Pd {
@@ -110,6 +110,7 @@ jobs:
               }
           }
 "@
+          Add-Type -TypeDefinition $src
           [Pd]::Probe($dll)
           Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
         continue-on-error: true
