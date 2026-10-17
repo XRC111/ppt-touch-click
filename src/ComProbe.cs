@@ -38,8 +38,8 @@ public static class ComProbe
 
             var clsid = new byte[16];
             var iid = new byte[16];
-            Guid.Parse("2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21").TryWriteBytes(clsid);
-            Guid.Parse("00000001-0000-0000-C000-000000000046").TryWriteBytes(iid);
+            Array.Copy(new Guid("2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21").ToByteArray(), clsid, 16);
+            Array.Copy(new Guid("00000001-0000-0000-C000-000000000046").ToByteArray(), iid, 16);
 
             IntPtr pClsid = Marshal.AllocHGlobal(16), pIid = Marshal.AllocHGlobal(16), ppv;
             try
