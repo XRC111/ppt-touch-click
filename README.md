@@ -124,7 +124,7 @@ Windows 10 上的 PowerPoint 会**自动判断**当前是“触摸设备”还�
 4. 自检：直接调用 `DllGetClassObject`（`src/ComProbe.cs`）验证 COM 工厂可用，再走 `regsvr32 /i:user` 验证 `DllRegisterServer`；
 5. 打包成 `PptTouchClick.zip` 作为构建产物上传。
 
-打一个 `v*` 标签，会额外发布到 Release：
+**每次 main 构建成功，runner 会自动打 tag（`v1.0.<构建号>`）并发布 Release，无需任何本地操作。** 若想手动发特定版本，也可以打一个 `v*` 标签：
 
 ```bat
 git tag v1.0.0 && git push origin v1.0.0

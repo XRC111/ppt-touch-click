@@ -107,8 +107,31 @@ jobs:
           name: PptTouchClick
           path: PptTouchClick.zip
 
-      # ---------------------------------------------------------------- 打 tag 时顺便发 Release
-      - name: Release
+      # ---------------------------------------------------------------- 每次构建成功自动发 Release（tag = v1.0.<构建号>）
+      - name: Release (auto)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_NO: ${{ github.run_number }}
+          RUN_ID: ${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          $tag = "v1.0.$env:RUN_NO"
+          $short = $env:SHA.Substring(0,7)
+          $notes = "自动构建 [run #$env:RUN_ID](https://github.com/$env:REPO/actions/runs/$env:RUN_ID)`n`n提交 [$short](https://github.com/$env:REPO/commit/$env:SHA)"
+          # tag 不存在就建（指向本次构建的提交）
+          try { gh api "repos/$env:REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:SHA" 2>$null | Out-Null } catch {}
+          if (gh release view $tag -R $env:REPO) {
+            gh release upload $tag PptTouchClick.zip -R $env:REPO --clobber
+          } else {
+            gh release create $tag PptTouchClick.zip -R $env:REPO --title "PptTouchClick $tag" --notes $notes
+          }
+          Write-Host "release: $tag"
+
+      # ---------------------------------------------------------------- 手动打 tag 时也发 Release
+      - name: Release (tag)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
