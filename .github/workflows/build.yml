@@ -73,16 +73,21 @@ jobs:
       - name: Native self-test (PowerShell 5.1)
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          & regsvr32 /s /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
+          # 注：按用户注册时 regsvr32 需要 /i:user 放在 DLL 参数之后
+          & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
           Write-Host "regsvr32 exit=$LASTEXITCODE"
-          $w = New-Object -ComObject PptTouchClick.SlideWatcher
-          "start=" + $w.Start()
-          "status=" + $w.GetStatus()
-          "stop=" + $w.Stop()
-          $rc = [Runtime.InteropServices.Marshal]::ReleaseComObject($w)
-          Write-Host "released=$rc"
-          & regsvr32 /s /u /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
+          $clsid = Get-Item "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
+          "InprocServer32=" + $clsid.GetValue("")
+
+          $type = [type]::GetTypeFromProgID("PptTouchClick.SlideWatcher", $true)
+          $w = [Activator]::CreateInstance($type)
+          $flags = [Reflection.BindingFlags]::InvokeMethod
+          "start="  + $type.InvokeMember("Start", $flags, $null, $w, $null)
+          "status=" + $type.InvokeMember("GetStatus", $flags, $null, $w, $null)
+          "stop="   + $type.InvokeMember("Stop", $flags, $null, $w, $null)
+          [Runtime.InteropServices.Marshal]::FinalReleaseComObject($w) | Out-Null
+
+          & regsvr32 /s /u "$PWD\dist\PptSlideProc.x64.dll" /i:user
           if (Test-Path dist\PptSlideProc.log) { Get-Content dist\PptSlideProc.log }
 
       # ---------------------------------------------------------------- 打包
