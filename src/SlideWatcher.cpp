@@ -31,7 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <olectl.h>    // RegisterTypeLibForUser / LoadTypeLibFromResource / RTRT_TYPELIB
+#include <olectl.h>    // LoadTypeLibEx / REGKIND_REGISTER
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -576,24 +576,30 @@ STDAPI DllRegisterServer()
     RegSetSz(HKEY_CURRENT_USER, progIdKey, L"", L"PptTouchClick SlideWatcher");
     RegSetSz(HKEY_CURRENT_USER, progIdKey + L"\\CLSID", L"", L"{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}");
 
-    // 类型库（可选；失败也不影响 CreateObject，C# 走 IDispatch 即可）
+    // 类型库：从资源里取出旁挂的 PptSlideProc.tlb 内容并注册（可选；失败不影响 CreateObject）
     bool typelibOk = false;
+    std::wstring tlbPath = mod.substr(0, mod.find_last_of(L"\\/") + 1) + L"PptSlideProc.tlb";
     HMODULE self = GetModuleHandleW(nullptr);
-    HRSRC res = FindResourceW(self, MAKEINTRESOURCEW(1), RT_TYPELIB);
+    HRSRC res = FindResourceW(self, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(5));   // 5 = RT_TYPELIB
     if (res)
     {
         HGLOBAL mem = LoadResource(self, res);
         DWORD size = SizeofResource(self, res);
-        void* data = LockResource(mem);
+        void* data = mem ? LockResource(mem) : nullptr;
         if (data && size)
         {
-            ITypeLib* tlb = nullptr;
-            if (SUCCEEDED(::LoadTypeLibFromResource(data, size, &tlb)) && tlb)
+            HANDLE hFile = CreateFileW(tlbPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE)
             {
-                std::wstring tlbPath = mod.substr(0, mod.find_last_of(L"\\/") + 1) + L"PptSlideProc.tlb";
-                HRESULT hr = RegisterTypeLibForUser(tlb, const_cast<LPOLESTR>(tlbPath.c_str()),
-                                                   const_cast<LPOLESTR>(L"PptSlideProc 1.0 Type Library"));
-                typelibOk = SUCCEEDED(hr);
+                DWORD written = 0;
+                WriteFile(hFile, data, size, &written, nullptr);
+                CloseHandle(hFile);
+            }
+            ITypeLib* tlb = nullptr;
+            if (SUCCEEDED(LoadTypeLibEx(tlbPath.c_str(), REGKIND_REGISTER, &tlb)) && tlb)
+            {
+                typelibOk = true;
                 tlb->Release();
             }
         }
