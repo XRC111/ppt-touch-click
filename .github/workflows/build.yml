@@ -76,7 +76,7 @@ jobs:
           # 注：按用户注册时 regsvr32 需要 /i:user 放在 DLL 参数之后
           & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
           Write-Host "regsvr32 exit=$LASTEXITCODE"
-          $clsid = Get-Item "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
+          $clsid = Get-Item "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
           "InprocServer32=" + $clsid.GetValue("")
 
           $type = [type]::GetTypeFromProgID("PptTouchClick.SlideWatcher", $true)

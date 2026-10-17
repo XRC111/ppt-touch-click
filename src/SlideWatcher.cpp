@@ -32,6 +32,7 @@
 #include <vector>
 
 #include <olectl.h>    // LoadTypeLibEx / REGKIND_REGISTER
+#include <cstring>     // memcpy
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -538,6 +539,38 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
 STDAPI DllCanUnloadNow()
 {
     return (g_objectCount.load() == 0 && g_serverLock == 0) ? S_OK : S_FALSE;
+}
+
+// ---------------- COM 内存分配器（ole32 属于延迟加载，宿主没有先初始化 COM 时也能用） ----------------
+static void EnsureOle32()
+{
+    if (GetModuleHandleW(L"ole32.dll") == nullptr) LoadLibraryW(L"ole32.dll");
+}
+
+STDAPI_(LPVOID) DllAlloc(long size)
+{
+    EnsureOle32();
+    return CoTaskMemAlloc((SIZE_T)size);
+}
+
+STDAPI_(LPVOID) DllRealloc(LPVOID p, long size)
+{
+    EnsureOle32();
+    return CoTaskMemRealloc(p, (SIZE_T)size);
+}
+
+STDAPI_(void) DllFree(LPVOID p)
+{
+    EnsureOle32();
+    CoTaskMemFree(p);
+}
+
+STDAPI_(BSTR) DllAllocStringLen(const OLECHAR* src, unsigned int len)
+{
+    EnsureOle32();
+    BSTR b = SysAllocStringLen(nullptr, len);
+    if (b && src) memcpy(b, src, (SIZE_T)len * sizeof(OLECHAR));
+    return b;
 }
 
 static std::wstring ModulePath()

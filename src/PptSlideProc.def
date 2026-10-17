@@ -5,5 +5,9 @@ EXPORTS
     DllCanUnloadNow         PRIVATE
     DllRegisterServer       PRIVATE
     DllUnregisterServer     PRIVATE
+    DllAlloc
+    DllRealloc
+    DllFree
+    DllAllocStringLen
     SlideProcGetCurrent
     SlideProcRunSelfTest
