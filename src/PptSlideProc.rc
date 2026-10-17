@@ -1,4 +1,4 @@
 // PptSlideProc 资源：把类型库注册到资源 ID 1，供 DllRegisterServer 加载
 #pragma code_page(65001)
 
-1 TYPELIB "PptSlideProc.tlb"
+1 TYPELIB "dist\\PptSlideProc.tlb"

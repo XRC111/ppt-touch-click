@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ------------------------------------------------------------------ 主程序
+      # ---------------------------------------------------------------- 主程序 (.NET Framework 4.8)
       - name: Compile PptTouchClick.exe
         shell: pwsh
         run: |
@@ -29,7 +29,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
           Get-Item dist\PptTouchClick.exe | Format-List Name,Length
 
-      # ------------------------------------------------------------------ 原生组件
+      # ---------------------------------------------------------------- 类型库（供 COM 注册）
+      - name: Make type library
+        shell: pwsh
+        run: |
+          $sdk = 'C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8.1 Tools'
+          $tlbexp = Get-ChildItem $sdk -Recurse -Filter tlbexp.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $tlbexp) { throw "tlbexp.exe not found" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          & $tlbexp.FullName src\PptSlideProc.tlb /out:dist\PptSlideProc.tlb
+          if ($LASTEXITCODE -ne 0) { throw "tlbexp failed: $LASTEXITCODE" }
+          Get-Item dist\PptSlideProc.tlb | Format-List Name,Length
+
+      # ---------------------------------------------------------------- 原生组件 (MSVC)
       - name: Setup MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -40,6 +52,7 @@ jobs:
         run: |
           rc /nologo /fo dist\PptSlideProc.res src\PptSlideProc.rc
           cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.x64.dll src\SlideWatcher.cpp dist\PptSlideProc.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+          if errorlevel 1 exit /b 1
 
       - name: Setup MSVC (x86)
         uses: ilammy/msvc-dev-cmd@v1
@@ -49,25 +62,27 @@ jobs:
       - name: Build PptSlideProc.ocx
         shell: cmd
         run: |
-          cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.ocx src\SlideWatcher.cpp dist\PptSlideProc.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+          rc /nologo /fo dist\PptSlideProc32.res src\PptSlideProc.rc
+          cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.ocx src\SlideWatcher.cpp dist\PptSlideProc32.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+          if errorlevel 1 exit /b 1
 
-      # ------------------------------------------------------------------ 自检
-      - name: Self-test native components (PowerShell 5.1)
+      # ---------------------------------------------------------------- 自检
+      - name: Native self-test (PowerShell 5.1)
         shell: powershell
         run: |
-          Copy-Item src\PptSlideProc.tlb dist\PptSlideProc.tlb
+          $ErrorActionPreference = 'Stop'
           & regsvr32 /s /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
-          $code = @"
-          `$w = New-Object -ComObject PptTouchClick.SlideWatcher
-          "start=" + `$w.Start()
-          "status=" + `$w.GetStatus()
-          "stop=" + `$w.Stop()
-          "@
-          & powershell -NoProfile -Command $code
-          if ($LASTEXITCODE -ne 0) { throw "COM self-test failed" }
+          Write-Host "regsvr32 exit=$LASTEXITCODE"
+          $w = New-Object -ComObject PptTouchClick.SlideWatcher
+          "start=" + $w.Start()
+          "status=" + $w.GetStatus()
+          "stop=" + $w.Stop()
+          $rc = [Runtime.InteropServices.Marshal]::ReleaseComObject($w)
+          Write-Host "released=$rc"
           & regsvr32 /s /u /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
+          if (Test-Path dist\PptSlideProc.log) { Get-Content dist\PptSlideProc.log }
 
-      # ------------------------------------------------------------------ 打包
+      # ---------------------------------------------------------------- 打包
       - name: Package
         shell: pwsh
         run: |
@@ -80,3 +95,12 @@ jobs:
         with:
           name: PptTouchClick
           path: PptTouchClick.zip
+
+      # ---------------------------------------------------------------- 打 tag 时顺便发 Release
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" PptTouchClick.zip --title "${{ github.ref_name }}" --notes "PptTouchClick 构建产物"
