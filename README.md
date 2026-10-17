@@ -26,11 +26,15 @@ Windows 10 上的 PowerPoint 会**自动判断**当前是“触摸设备”还�
 | 文件 | 说明 |
 | --- | --- |
 | `PptTouchClick.exe` | 主程序：桌面代理，托盘里出现黄色图标；不是 PowerPoint 加载项，重启 PPT 不受影响 |
-| `PptSlideProc.ocx` | 原生 COM 组件（32 位）：安装**全局触摸钩子**（吞掉滑动/长按），并读取 PowerPoint “最近访问幻灯片”给出当前页 |
-| `PptSlideProc.x64.dll` | 同上，64 位进程内 COM 版本 |
-| `PptSlideProc.tlb` | 类型库（组件注册用，已内嵌在 DLL 资源里） |
-| `install.cmd` / `uninstall.cmd` | 安装 / 卸载 |
+| `PptSlideProc.x64.dll` | 原生 COM 组件（64 位）：安装**全局触摸钩子**（吞掉滑动/长按），并读取 PowerPoint “最近访问幻灯片”给出当前页 |
+| `PptSlideProc.ocx` | 同上，32 位进程内 COM 版本 |
+| `PptSlideProc.tlb` | 类型库（注册用，已内嵌在 DLL 资源里） |
+| `install.cmd` / `uninstall.cmd` | 安装 / 卸载（需管理员） |
 | `PptTouchClick.log`、`PptSlideProc.log` | 运行日志（排错用） |
+
+> **重要**：主程序**不依赖**原生组件也能“点空白 → 翻页”。
+> 组件只额外提供两件事：① 滑动/长按过滤；② 放映时精确知道当前是第几页（换页即重新识别页面元素）。
+> 组件没装好时，程序会自动降级：按“页面变化”重扫，偶尔慢半拍，但不会崩。
 
 > 页码来源：PowerPoint 放映时会把“最近访问过的幻灯片”顺序写进注册表 `HKCU\Software\Microsoft\Office\16.0\PowerPoint\Document MRU\<文件>`。
 > 组件把它换算成“当前是第几页”，主程序据此判断“这一页上哪些地方是内容、哪些地方是空白”。
@@ -104,27 +108,39 @@ Windows 10 上的 PowerPoint 会**自动判断**当前是“触摸设备”还�
 - “空白”是按画面识别出来的：**整页背景图且没有留白**的页、或页面上大量装饰图形，可能被整体当作内容而不翻页。此时点页面四周留白或改用翻页笔。
 - 按钮/超链接的“保护”是**按位置**生效的：点在按钮上交给 PPT 处理，不会翻页；如果按钮本身没有设置任何动作，那么点了也不会翻页。
 - 需要 Windows 8/10 及以上（触摸注入 API 自 Windows 8 起提供）；Windows 7 不可用。
-- 使用管理员权限安装的组件只在**当前用户**下注册；如果换了 Windows 账户需要重新安装。
+- 组件按**当前用户**注册（`HKCU\Software\Classes`）；换了 Windows 账户需要重新安装。
+- 自检/验证已在 GitHub Actions（Windows Server 2022，有触摸 API）通过；**真机触摸屏上的“点空白翻页”手感需要你实机确认**，
+  如果不跟手，优先调 `AdvanceDelayMs`（默认 160ms）和 `DebounceMs`（默认 800ms）。
 
 ---
 
-## 自己编译
+## 编译 / 发布
 
-不需要装任何 SDK，GitHub Actions 的 Windows runner 上直接编：
+**推荐：推送即编译。** `.github/workflows/build.yml` 在 `windows-latest` 上：
+
+1. 用系统自带的 `csc.exe`（.NET Framework 4.8）编 `PptTouchClick.exe`；
+2. 用 `tlbexp.exe` 从桩程序集 `src/PptSlideProc.TlbGen.dll` 生成 `PptSlideProc.tlb`（仓库里也放了一份预生成的，生成失败时自动回退）；
+3. 用 MSVC 分别编 x64 / x86 的 `PptSlideProc.x64.dll` 与 `PptSlideProc.ocx`；
+4. 自检：直接调用 `DllGetClassObject`（`src/ComProbe.cs`）验证 COM 工厂可用，再走 `regsvr32 /i:user` 验证 `DllRegisterServer`；
+5. 打包成 `PptTouchClick.zip` 作为构建产物上传。
+
+打一个 `v*` 标签，会额外发布到 Release：
 
 ```bat
-:: 主程序（64 位 .NET Framework 4.8 自带编译器）
-%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ ^
-  /out:PptTouchClick.exe ^
-  /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
-  PptTouchClick.cs Slideshow.cs Hook.cs Tray.cs TouchInjector.cs
-
-:: 原生组件（需已安装 Visual Studio Build Tools）
-call vcvarsall.bat x64 && cl /O2 /EHsc /DUNICODE /D_UNICODE /LD /Fe:PptSlideProc.x64.dll src\SlideWatcher.cpp oleaut32.lib
-call vcvarsall.bat x86 && cl /O2 /EHsc /DUNICODE /D_UNICODE /LD /Fe:PptSlideProc.ocx src\SlideWatcher.cpp oleaut32.lib /link /def:src\PptSlideProc.def
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
-或者直接推送，`.github/workflows/build.yml` 会产出 `PptTouchClick.zip` 构建产物。
+**本地只编 exe**（没有 Visual Studio 也能跑，只是没有滑动过滤和页码组件）：
+
+```powershell
+.\build.ps1        # 输出 dist\PptTouchClick.exe
+```
+
+**本地生成类型库**：`.\gen-tlb.ps1`（或 Git Bash 下的 `./gen-tlb.sh`）。
+
+> 坑记录：CI 里用 PowerShell 的 `New-Object -ComObject` 创建本组件会报 `CO_E_ERRORINDLL`，
+> 原因是 CoreCLR（PowerShell 7 / .NET 平台）对只有 IDispatch、没有 TypeLib 的进程内组件会拒绝 `CoCreateInstance`；
+> 同一个组件在桌面版 PowerShell 5.1、VBScript、C# 里都能正常创建。CI 因此改为“直接调用导出函数 + regsvr32”来验证。
 
 ---
 

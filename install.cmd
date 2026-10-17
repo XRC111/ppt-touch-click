@@ -21,21 +21,33 @@ if not exist "PptSlideProc.x64.dll" (
     pause
     exit /b 1
 )
+if not exist "PptTouchClick.exe" (
+    echo [错误] 同目录下找不到 PptTouchClick.exe。
+    pause
+    exit /b 1
+)
 
-echo [1/4] 注册页码/触摸组件（64 位 / 32 位）...
+echo [1/5] 注册页码/触摸组件（64 位 + 32 位）...
 regsvr32 /s "%CD%\PptSlideProc.x64.dll"
 regsvr32 /s "%CD%\PptSlideProc.ocx"
-if not exist "PptSlideProc.ocx" echo        [跳过] 没有 32 位组件
 
-echo [2/4] 设置开机自动启动...
+echo [2/5] 检查注册结果...
+reg query "HKCU\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32" >nul 2>&1
+if errorlevel 1 (
+    echo        [警告] 组件未注册成功：滑动过滤不可用，但“点击空白翻页”仍然有效。
+) else (
+    echo        组件注册成功。
+)
+
+echo [3/5] 设置开机自动启动...
 "PptTouchClick.exe" --install-autostart
 if errorlevel 1 echo        （设置失败，可稍后在托盘菜单里手动设置）
 
-echo [3/4] 启动代理...
+echo [4/5] 启动代理...
 taskkill /im PptTouchClick.exe /f >nul 2>&1
 start "" "PptTouchClick.exe"
 
-echo [4/4] 完成。
+echo [5/5] 完成。
 echo.
 echo   托盘里会出现黄色播放图标；右键可查看状态 / 暂停 / 打开日志。
 echo   放映时：点空白处 = 下一页；点文字、图片、按钮 = 不翻页。

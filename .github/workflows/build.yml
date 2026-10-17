@@ -94,9 +94,12 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          Copy-Item README.md, install.cmd, uninstall.cmd dist\
-          Compress-Archive -Path dist\* -DestinationPath PptTouchClick.zip -Force
-          Get-ChildItem dist | Format-Table Name,Length
+          # 只打包运行需要的文件（去掉 .lib / .exp / .res 等链接中间产物）
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item README.md, install.cmd, uninstall.cmd stage\
+          Copy-Item dist\PptTouchClick.exe, dist\PptSlideProc.x64.dll, dist\PptSlideProc.ocx, dist\PptSlideProc.tlb stage\
+          Compress-Archive -Path stage\* -DestinationPath PptTouchClick.zip -Force
+          Get-ChildItem stage | Format-Table Name,Length
           Get-Item PptTouchClick.zip | Format-List Name,Length
 
       - uses: actions/upload-artifact@v4
