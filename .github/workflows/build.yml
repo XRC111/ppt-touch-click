@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------ 主程序
+      - name: Compile PptTouchClick.exe
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (-not (Test-Path $csc)) { throw "csc.exe not found" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          & $csc /nologo /target:winexe /optimize+ /utf8output /out:dist\PptTouchClick.exe `
+            /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
+            PptTouchClick.cs Slideshow.cs Hook.cs Tray.cs TouchInjector.cs
+          if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
+          Get-Item dist\PptTouchClick.exe | Format-List Name,Length
+
+      # ------------------------------------------------------------------ 原生组件
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build PptSlideProc.x64.dll
+        shell: cmd
+        run: |
+          rc /nologo /fo dist\PptSlideProc.res src\PptSlideProc.rc
+          cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.x64.dll src\SlideWatcher.cpp dist\PptSlideProc.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+
+      - name: Setup MSVC (x86)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build PptSlideProc.ocx
+        shell: cmd
+        run: |
+          cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.ocx src\SlideWatcher.cpp dist\PptSlideProc.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+
+      # ------------------------------------------------------------------ 自检
+      - name: Self-test native components (PowerShell 5.1)
+        shell: powershell
+        run: |
+          Copy-Item src\PptSlideProc.tlb dist\PptSlideProc.tlb
+          & regsvr32 /s /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
+          $code = @"
+          `$w = New-Object -ComObject PptTouchClick.SlideWatcher
+          "start=" + `$w.Start()
+          "status=" + `$w.GetStatus()
+          "stop=" + `$w.Stop()
+          "@
+          & powershell -NoProfile -Command $code
+          if ($LASTEXITCODE -ne 0) { throw "COM self-test failed" }
+          & regsvr32 /s /u /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
+
+      # ------------------------------------------------------------------ 打包
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md, install.cmd, uninstall.cmd dist\
+          Compress-Archive -Path dist\* -DestinationPath PptTouchClick.zip -Force
+          Get-ChildItem dist | Format-Table Name,Length
+          Get-Item PptTouchClick.zip | Format-List Name,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PptTouchClick
+          path: PptTouchClick.zip
