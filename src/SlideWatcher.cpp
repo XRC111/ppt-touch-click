@@ -31,7 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <olectl.h>    // RegisterTypeLibForUser / LoadTypeLibFromResource / RT_TYPELIB
+#include <olectl.h>    // RegisterTypeLibForUser / LoadTypeLibFromResource / RTRT_TYPELIB
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -525,7 +525,7 @@ private:
     std::atomic<ULONG> m_ref;
 };
 
-extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
 {
     if (!ppv) return E_POINTER;
     if (!IsEqualCLSID(rclsid, kClsidSlideWatcher)) return CLASS_E_CLASSNOTAVAILABLE;
@@ -535,7 +535,7 @@ extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rc
     return hr;
 }
 
-extern "C" __declspec(dllexport) HRESULT __stdcall DllCanUnloadNow()
+STDAPI DllCanUnloadNow()
 {
     return (g_objectCount.load() == 0 && g_serverLock == 0) ? S_OK : S_FALSE;
 }
@@ -560,7 +560,7 @@ static LONG RegSetSz(HKEY root, const std::wstring& sub, const std::wstring& nam
 }
 
 /// 注册 COM 类：HKCU\Software\Classes\CLSID\{...}（按当前用户，无需管理员；安装脚本会用管理员跑一次）
-extern "C" __declspec(dllexport) HRESULT __stdcall DllRegisterServer()
+STDAPI DllRegisterServer()
 {
     const std::wstring mod = ModulePath();
     const std::wstring clsidKey = L"Software\\Classes\\CLSID\\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}";
@@ -588,7 +588,7 @@ extern "C" __declspec(dllexport) HRESULT __stdcall DllRegisterServer()
         if (data && size)
         {
             ITypeLib* tlb = nullptr;
-            if (SUCCEEDED(LoadTypeLibFromResource(data, size, &tlb)) && tlb)
+            if (SUCCEEDED(::LoadTypeLibFromResource(data, size, &tlb)) && tlb)
             {
                 std::wstring tlbPath = mod.substr(0, mod.find_last_of(L"\\/") + 1) + L"PptSlideProc.tlb";
                 HRESULT hr = RegisterTypeLibForUser(tlb, const_cast<LPOLESTR>(tlbPath.c_str()),
@@ -623,7 +623,7 @@ static LONG RegDeleteTree(HKEY root, const std::wstring& sub)
     return ERROR_SUCCESS;
 }
 
-extern "C" __declspec(dllexport) HRESULT __stdcall DllUnregisterServer()
+STDAPI DllUnregisterServer()
 {
     RegDeleteTree(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}");
     RegDeleteTree(HKEY_CURRENT_USER, L"Software\\Classes\\PptTouchClick.SlideWatcher");
@@ -651,7 +651,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SlideProcRunSelfTest()
 {
     // 供 CI 用：能加载、能取类对象、能算一次页码即视为通过
     IClassFactory* cf = nullptr;
-    HRESULT hr = DllGetClassObject(kClsidSlideWatcher, IID_IClassFactory, reinterpret_cast<void**>(&cf));
+    HRESULT hr = ::DllGetClassObject(kClsidSlideWatcher, IID_IClassFactory, reinterpret_cast<void**>(&cf));
     if (FAILED(hr) || !cf) return 1;
     IDispatch* d = nullptr;
     hr = cf->CreateInstance(nullptr, IID_IDispatch, reinterpret_cast<void**>(&d));
