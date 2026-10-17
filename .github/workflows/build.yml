@@ -86,17 +86,9 @@ jobs:
           & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
           Write-Host "regsvr32 exit=$LASTEXITCODE"
 
-          # ---- 深度诊断（只打印，不中断）----
-          Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public static class Nt { [DllImport(`"kernel32.dll`", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr LoadLibraryW(string p); [DllImport(`"kernel32.dll`")] public static extern IntPtr GetProcAddress(IntPtr h, string n); }"
-          $h = [Nt]::LoadLibraryW("$PWD\dist\PptSlideProc.x64.dll")
-          "LoadLibrary=" + $h + " err=" + [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-          if ($h -ne [IntPtr]::Zero) {
-            "DllGetClassObject=" + [Nt]::GetProcAddress($h, "DllGetClassObject")
-            "DllRegisterServer=" + [Nt]::GetProcAddress($h, "DllRegisterServer")
-          }
-          Write-Host "regsvr32(verbose):"
-          & regsvr32 /n /i:user "$PWD\dist\PptSlideProc.x64.dll"
-          Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
+          # ---- 诊断：先手动 LoadLibrary（COM 自身加载失败时不会有别的提示）----
+          Add-Type -Path "$PWD\src\ComProbe.cs"
+          [ComProbe]::Run("$PWD\dist\PptSlideProc.x64.dll")
           # ---- 诊断结束 ----
 
           $type = [type]::GetTypeFromProgID("PptTouchClick.SlideWatcher", $true)
