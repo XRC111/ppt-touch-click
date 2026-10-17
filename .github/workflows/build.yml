@@ -94,13 +94,24 @@ jobs:
         shell: powershell
         run: |
           $dll = "$PWD\dist\PptSlideProc.x64.dll"
-          $load = [System.Runtime.InteropServices.NativeLibrary]::Load($dll)
-          "NativeLibrary.Load ok: $load"
-          $hInst = [System.Runtime.InteropServices.Marshal]::GetHINSTANCE([System.Reflection.Assembly]::GetAssembly([object]).GetType().Module)
-          $sig = '[DllImport("PptSlideProc.x64.dll")] public static extern int DllRegisterServer();'
-          Add-Type -MemberDefinition $sig -Name Pd -Namespace Ppt
-          "DllRegisterServer=0x{0:X8}" -f [Ppt.Pd]::DllRegisterServer()
-          "proc log:"; Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class Pd {
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              public static extern IntPtr LoadLibraryW(string p);
+              [DllImport("PptSlideProc.x64.dll")]
+              public static extern int DllRegisterServer();
+              public static string Probe(string dll) {
+                  IntPtr h = LoadLibraryW(dll);
+                  if (h == IntPtr.Zero) return "LoadLibrary failed err=" + Marshal.GetLastWin32Error();
+                  int hr = DllRegisterServer();
+                  return "loaded, DllRegisterServer=0x" + hr.ToString("X8");
+              }
+          }
+"@
+          [Pd]::Probe($dll)
+          Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
         continue-on-error: true
 
       # ---------------------------------------------------------------- 打包
