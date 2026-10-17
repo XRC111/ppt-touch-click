@@ -7,6 +7,7 @@
 //       GetStatus()   -> string 形如 "ver=1.0.0 hook=on swallowed=0 slide=3/12 [...]"
 //       Stop()        -> bool
 //   - 导出 SlideProcGetCurrent(int* current0, int* total)
+//   - 导出 DllRegisterServer / DllUnregisterServer（regsvr32 会调用）
 //
 // 为什么需要它：C# 托管进程调用 SetWindowsHookEx(WH_POINTER) 时 hMod 为 NULL，钩子装不上；
 // 由本原生模块安装即可，同时把"当前页"从 PowerPoint 的 MRU 注册表里算出来，C# 端零解析。
@@ -23,7 +24,32 @@
 #include <windows.h>
 #include <objbase.h>
 #include <oleauto.h>
+#include <ole2.h>
 #include <cstdint>
+
+// 指针消息结构（WH_POINTER 钩子的 lParam）：WinUser.h 在部分 SDK 版本里没有，这里自带一份
+#ifndef PPTPOINTER_INFO_DEFINED
+#define PPTPOINTER_INFO_DEFINED
+struct PPTPOINTER_INFO
+{
+    DWORD pointerType;
+    DWORD pointerId;
+    DWORD frameId;
+    DWORD pointerFlags;
+    HANDLE sourceDevice;
+    HWND hwndTarget;
+    POINT ptPixelLocation;
+    POINT ptHimetricLocation;
+    POINT ptPixelLocationRaw;
+    POINT ptHimetricLocationRaw;
+    DWORD dwTime;
+    UINT32 historyCount;
+    INT32 InputState;
+    DWORD dwKeyStates;
+    UINT64 PerformanceCount;
+    INT32 ButtonChangeType;
+};
+#endif
 
 #define PPTSLIDEPROC_VERSION L"1.0.0"
 
