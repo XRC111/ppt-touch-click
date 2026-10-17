@@ -29,21 +29,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
           Get-Item dist\PptTouchClick.exe | Format-List Name,Length
 
-      # ---------------------------------------------------------------- 类型库（供 COM 注册）
-      - name: Make type library
-        shell: pwsh
-        run: |
-          $sdk = 'C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8.1 Tools'
-          $tlbexp = Get-ChildItem $sdk -Recurse -Filter tlbexp.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $tlbexp) { throw "tlbexp.exe not found" }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:library /out:dist\PptSlideProc.tlb.dll src\PptSlideProc.tlb.cs
-          if ($LASTEXITCODE -ne 0) { throw "csc (tlb stub) failed: $LASTEXITCODE" }
-          & $tlbexp.FullName dist\PptSlideProc.tlb.dll /out:dist\PptSlideProc.tlb
-          if ($LASTEXITCODE -ne 0) { throw "tlbexp failed: $LASTEXITCODE" }
-          Get-Item dist\PptSlideProc.tlb | Format-List Name,Length
-
       # ---------------------------------------------------------------- 原生组件 (MSVC)
       - name: Setup MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1
@@ -73,11 +58,12 @@ jobs:
       - name: Native self-test (PowerShell 5.1)
         shell: powershell
         run: |
-          # 注：按用户注册时 regsvr32 需要 /i:user 放在 DLL 参数之后
+          # 按用户注册（无需管理员）：/i:user 必须放在 DLL 参数之后
           & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
           Write-Host "regsvr32 exit=$LASTEXITCODE"
-          $clsid = Get-Item "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
-          "InprocServer32=" + $clsid.GetValue("")
+          $reg = "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
+          if (-not (Test-Path $reg)) { throw "COM class was not registered (regsvr32 failed)" }
+          "InprocServer32=" + (Get-ItemProperty $reg).'(default)'
 
           $type = [type]::GetTypeFromProgID("PptTouchClick.SlideWatcher", $true)
           $w = [Activator]::CreateInstance($type)
