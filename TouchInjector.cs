@@ -48,7 +48,9 @@ namespace PptTouchClick
         private static bool _initialized;
         private static bool _disabled;
         private static int _failures;
-        private static uint _nextId = 100;
+        // 注入的 pointerId 必须在 [0, MAX_TOUCHES) 范围内（InitializeTouchInjection 的约定），
+        // 之前从 100 开始，InjectTouchInput 会以 ERROR_INVALID_PARAMETER 失败。
+        private static uint _nextId;
 
         /// <summary>本机是否支持触摸注入（Win8/10 触摸屏上为 true）。</summary>
         internal static bool Available
@@ -88,7 +90,8 @@ namespace PptTouchClick
             {
                 if (GetForegroundWindow() != hwnd) SetForegroundWindow(hwnd);
 
-                uint id = _nextId++;
+                uint id = _nextId;
+                _nextId = (_nextId + 1) % MAX_TOUCHES;
                 int x = screenPoint.X, y = screenPoint.Y;
                 var area = new RECT { Left = x - 5, Top = y - 5, Right = x + 5, Bottom = y + 5 };
 
