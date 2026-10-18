@@ -1,7 +1,11 @@
 // PptTouchClick - 让 PowerPoint(Win10) 放映时"触控单击 = 翻页"的放映代理
 //
 // 编译（无需装 SDK，用 .NET Framework 4.8 自带编译器；GitHub Actions 上也是这么编）：
-//   %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /optimize+ /out:PptTouchClick.exe *.cs
+//   %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /optimize+ ^
+//       /win32manifest:app.manifest /out:PptTouchClick.exe *.cs
+//
+// app.manifest 声明 PerMonitorV2 DPI 感知：否则在 125%/150% 缩放的屏幕上，
+// 钩子拿到的是物理像素、窗口矩形是虚拟化坐标，两者对不上，空白/内容判定会整体错位。
 //
 // 参数：
 //   --mouse-only         不做触摸注入，只把"有效单击"换成 PageDown（仍过滤滑动/长按）
@@ -51,6 +55,7 @@ namespace PptTouchClick
             {
                 if (!createdNew) return 0;   // 已有实例在跑
 
+                Native.EnableDpiAwareness();   // 兜底：manifest 缺失时也要对齐物理像素
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -125,8 +130,10 @@ namespace PptTouchClick
         private IntPtr _lastHwnd = IntPtr.Zero;
         private DateTime _lastRefresh = DateTime.MinValue;
         private DateTime _keyboardUntil = DateTime.MinValue;
+        private DateTime _lastTrim = DateTime.MinValue;
         private bool _clickRunning;
         private Point _mouseDownPos;
+        private bool _mouseDownSeen;
 
         /// <summary>托盘菜单里的"暂停翻页代理"。</summary>
         internal bool Enabled_ = true;
@@ -227,6 +234,12 @@ namespace PptTouchClick
             if (_kbHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(_kbHook); _kbHook = IntPtr.Zero; }
         }
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _tray != null) { _tray.Dispose(); _tray = null; }
+            base.Dispose(disposing);
+        }
+
         internal void ExitApp()
         {
             Program.Log("exit requested");
@@ -248,18 +261,13 @@ namespace PptTouchClick
                 if (msg == Native.WM_LBUTTONDOWN)
                 {
                     _mouseDownPos = new Point(ms.ptX, ms.ptY);
+                    _mouseDownSeen = true;
                 }
                 else if (msg == Native.WM_LBUTTONUP)
                 {
-                    EnqueueClick(_mouseDownPos, 1, "mouse");
-                }
-                else if (msg == Native.WM_RBUTTONUP)
-                {
-                    EnqueueClick(new Point(ms.ptX, ms.ptY), 2, "mouse");
-                }
-                else if (msg == Native.WM_MBUTTONUP)
-                {
-                    EnqueueClick(new Point(ms.ptX, ms.ptY), 4, "mouse");
+                    // 只认左键：右键/中键（例如放映时右键开菜单）不该触发翻页
+                    if (_mouseDownSeen) EnqueueClick(_mouseDownPos, 1, "mouse");
+                    _mouseDownSeen = false;
                 }
             }
             catch (Exception ex) { Program.Log("mouse hook: " + ex.Message); }
@@ -275,6 +283,11 @@ namespace PptTouchClick
             {
                 var info = (POINTER_INFO)Marshal.PtrToStructure(lParam, typeof(POINTER_INFO));
                 if (info.pointerType != Native.PT_TOUCH)
+                    return Native.CallNextHookEx(_touchHook, code, wParam, lParam);
+
+                // 只在放映时接管触摸：否则会把全系统的滑动/缩放/长按一起吞掉
+                var cur = _state;
+                if (!Enabled_ || cur == null || !cur.Fullscreen)
                     return Native.CallNextHookEx(_touchHook, code, wParam, lParam);
 
                 int id = (int)info.pointerId;
@@ -308,7 +321,16 @@ namespace PptTouchClick
                             _touches[id] = s;
                             return swallow;
                         }
-                        if (s.Swallow) return swallow;
+                        if (s.Swallow)
+                        {
+                            // 滑动的抬起也要吃掉，并把触点从表里移除，避免状态越积越多
+                            if (up)
+                            {
+                                TouchState dropped0;
+                                _touches.TryRemove(id, out dropped0);
+                            }
+                            return swallow;
+                        }
                         if (up)
                         {
                             long held = unchecked(Environment.TickCount - s.Tick);
@@ -379,7 +401,11 @@ namespace PptTouchClick
                 lock (_qLock) { while (_queue.Count > 0) batch.Add(_queue.Dequeue()); }
                 if (batch.Count > 0)
                 {
-                    foreach (var ev in batch) ProcessClick(ev);
+                    foreach (var ev in batch)
+                    {
+                        try { ProcessClick(ev); }
+                        catch (Exception ex) { Program.Log("process click: " + ex.Message); }
+                    }
                     batch.Clear();
                 }
                 if ((DateTime.Now - _lastRefresh).TotalMilliseconds > 300)
@@ -397,30 +423,57 @@ namespace PptTouchClick
         internal void RefreshState(bool force)
         {
             IntPtr h = Slideshow.FindSlideshowWindow();
-            var ns = new SlideshowState();
             if (h != IntPtr.Zero)
             {
-                ns.Handle = h;
-                ns.Fullscreen = true;
-                ns.Enabled = true;
-                bool changed = SlideModel.Update(h, ns);
+                // 必须复用同一个状态对象：否则每次刷新都是"空状态"，
+                // 页码缓存永远命中不了，会变成每 300ms 全屏重扫一次。
+                var st = _state;
                 bool switched = _lastHwnd != h;
-                _state = ns;
+                if (switched)
+                {
+                    st.Handle = h;
+                    st.Fullscreen = true;
+                    st.Enabled = true;
+                    st.ContentRect = Rectangle.Empty;
+                    st.PageShapes = null;
+                    st.PageShapesTime = DateTime.MinValue;
+                    st.Key = SlideKey.None;
+                }
+                st.Handle = h;
+                st.Fullscreen = true;
+                st.Enabled = true;
+
+                bool changed = SlideModel.Update(h, st);
                 if (switched || changed || force)
                     Program.Log("presenting hwnd=0x" + h.ToString("X")
-                                + " slide=" + ns.Key
-                                + " content=" + ns.ContentRect
-                                + " shapes=" + (ns.PageShapes == null ? "n/a" : ns.PageShapes.Count.ToString()));
+                                + " slide=" + st.Key
+                                + " content=" + st.ContentRect
+                                + " shapes=" + (st.PageShapes == null ? "n/a" : st.PageShapes.Count.ToString()));
                 if (switched || changed) ClearTransient();
             }
             else if (_lastHwnd != IntPtr.Zero || force)
             {
-                _state = ns;
+                _state = new SlideshowState();
                 Program.Log("not presenting");
                 ClearTransient();
             }
             _lastHwnd = h;
+            MaybeTrimLog();
             if (_tray != null) _tray.Refresh(false);
+        }
+
+        /// <summary>长时间放映时日志会持续增长：每 10 分钟检查一次，超过 2MB 就截断重开。</summary>
+        private void MaybeTrimLog()
+        {
+            if ((DateTime.Now - _lastTrim).TotalMinutes < 10) return;
+            _lastTrim = DateTime.Now;
+            try
+            {
+                string path = Program.LogPath;
+                if (path != null && File.Exists(path) && new FileInfo(path).Length > 2 * 1024 * 1024)
+                    File.WriteAllText(path, string.Empty);
+            }
+            catch { }
         }
 
         private void ClearTransient()
@@ -431,6 +484,7 @@ namespace PptTouchClick
         private void ProcessClick(RawEvent ev)
         {
             var st = _state;
+            if (ev.Button != 1) return;                                            // 只处理左键/单指点击
             if (!Enabled_ || !st.Fullscreen || !st.Enabled) return;
             if (ev.Time < _keyboardUntil) return;
             if (_clickRunning) return;
@@ -440,12 +494,17 @@ namespace PptTouchClick
             if (IsMarked(p)) return;                                               // 刚处理过的位置
             if (st.PageShapes != null && SlideModel.PointInsideShape(st.PageShapes, p)) return; // 文字/图片/按钮上
 
-            var key = new DebounceKey(st.Handle, st.Key.Current ?? -1, ev.Button);
-            var now = DateTime.Now;
-            DateTime last;
-            if (_debounce.TryGetValue(key, out last) && (now - last).TotalMilliseconds < DebounceMs) return;
-            _debounce[key] = now;
-            if (_debounce.Count > 64) _debounce.Clear();
+            // 只有知道当前页码时才做"同页去抖"：页码未知时按页去抖会把快速连点吃掉
+            int slide = st.Key.Current ?? -1;
+            if (slide >= 0)
+            {
+                var key = new DebounceKey(st.Handle, slide, ev.Button);
+                var tnow = DateTime.Now;
+                DateTime last;
+                if (_debounce.TryGetValue(key, out last) && (tnow - last).TotalMilliseconds < DebounceMs) return;
+                _debounce[key] = tnow;
+                if (_debounce.Count > 64) _debounce.Clear();
+            }
 
             _clickRunning = true;
             Mark(p, 2);

@@ -23,7 +23,7 @@ jobs:
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
           if (-not (Test-Path $csc)) { throw "csc.exe not found" }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          & $csc /nologo /target:winexe /optimize+ /utf8output /out:dist\PptTouchClick.exe `
+          & $csc /nologo /target:winexe /optimize+ /utf8output /win32manifest:app.manifest /out:dist\PptTouchClick.exe `
             /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
             PptTouchClick.cs Slideshow.cs Hook.cs Tray.cs TouchInjector.cs
           if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
@@ -54,7 +54,7 @@ jobs:
         shell: cmd
         run: |
           rc /nologo /fo dist\PptSlideProc.res src\PptSlideProc.rc
-          cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.x64.dll src\SlideWatcher.cpp dist\PptSlideProc.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+          cl /nologo /O2 /EHsc /utf-8 /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.x64.dll src\SlideWatcher.cpp dist\PptSlideProc.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
           if errorlevel 1 exit /b 1
 
       - name: Setup MSVC (x86)
@@ -66,7 +66,7 @@ jobs:
         shell: cmd
         run: |
           rc /nologo /fo dist\PptSlideProc32.res src\PptSlideProc.rc
-          cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.ocx src\SlideWatcher.cpp dist\PptSlideProc32.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
+          cl /nologo /O2 /EHsc /utf-8 /W3 /DUNICODE /D_UNICODE /LD /Fe:dist\PptSlideProc.ocx src\SlideWatcher.cpp dist\PptSlideProc32.res oleaut32.lib ole32.lib /link /DEF:src\PptSlideProc.def
           if errorlevel 1 exit /b 1
 
       # ---------------------------------------------------------------- 自检
@@ -79,8 +79,8 @@ jobs:
           Write-Host $probe
           if ($probe -notmatch "DllGetClassObject=0x00000000") { throw "DllGetClassObject failed: $probe" }
 
-          # 2) 安装路径：走 regsvr32 /i:user（按用户注册，DllRegisterServer）
-          & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll" /i:user
+          # 2) 安装路径：走 regsvr32（按用户注册，DllRegisterServer 写 HKCU）
+          & regsvr32 /s "$PWD\dist\PptSlideProc.x64.dll"
           Write-Host "regsvr32 exit=$LASTEXITCODE"
           $reg = "HKCU:\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32"
           if (-not (Test-Path $reg)) { throw "COM class was not registered (regsvr32 failed)" }
@@ -89,7 +89,7 @@ jobs:
           # 3) 组件日志：应能看到 loaded / Start / hook
           Get-Content "$PWD\dist\PptSlideProc.log" -ErrorAction SilentlyContinue
 
-          & regsvr32 /s /u "$PWD\dist\PptSlideProc.x64.dll" /i:user
+          & regsvr32 /s /u "$PWD\dist\PptSlideProc.x64.dll"
       # ---------------------------------------------------------------- 打包
       - name: Package
         shell: pwsh
@@ -121,9 +121,10 @@ jobs:
           $tag = "v1.0.$env:RUN_NO"
           $short = $env:SHA.Substring(0,7)
           $notes = "自动构建 [run #$env:RUN_ID](https://github.com/$env:REPO/actions/runs/$env:RUN_ID)`n`n提交 [$short](https://github.com/$env:REPO/commit/$env:SHA)"
-          # tag 不存在就建（指向本次构建的提交）
-          try { gh api "repos/$env:REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:SHA" 2>$null | Out-Null } catch {}
-          if (gh release view $tag -R $env:REPO) {
+          # tag 不存在就建（指向本次构建的提交）；已存在时 gh 会非零退出，忽略即可
+          gh api "repos/$env:REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:SHA" 2>$null | Out-Null
+          gh release view $tag -R $env:REPO 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
             gh release upload $tag PptTouchClick.zip -R $env:REPO --clobber
           } else {
             gh release create $tag PptTouchClick.zip -R $env:REPO --title "PptTouchClick $tag" --notes $notes

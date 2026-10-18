@@ -21,8 +21,11 @@ echo [2/3] 取消开机启动...
 if exist "PptTouchClick.exe" "PptTouchClick.exe" --remove-autostart
 
 echo [3/3] 注销组件...
-if exist "PptSlideProc.x64.dll" regsvr32 /s /u "%CD%\PptSlideProc.x64.dll"
-if exist "PptSlideProc.ocx"     regsvr32 /s /u "%CD%\PptSlideProc.ocx"
+if exist "%WINDIR%\SysWOW64\regsvr32.exe" (
+    if exist "PptSlideProc.x64.dll" "%WINDIR%\System32\regsvr32.exe" /s /u "%CD%\PptSlideProc.x64.dll"
+) else (
+    if exist "PptSlideProc.ocx" "%WINDIR%\System32\regsvr32.exe" /s /u "%CD%\PptSlideProc.ocx"
+)
 rem 兜底：直接删掉当前用户的 COM 注册
 reg delete "HKCU\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}" /f >nul 2>&1
 reg delete "HKCU\Software\Classes\PptTouchClick.SlideWatcher" /f >nul 2>&1
