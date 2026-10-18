@@ -213,6 +213,9 @@ namespace PptTouchClick
         internal static extern uint SendInput(uint n, INPUT[] inputs, int size);
 
         [DllImport("user32.dll")]
+        internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll")]
         internal static extern bool IsPenTouchAvailable();
 
         [DllImport("shcore.dll")]
@@ -233,6 +236,14 @@ namespace PptTouchClick
 
         internal static void SendInputKey(int vk)
         {
+            // INPUT 的联合体在 32 位下偏移是 4、64 位下是 8；这里按 64 位布局声明，
+            // 32 位进程（32 位 Windows）改用 keybd_event，否则 SendInput 会因 cbSize 不对而失败。
+            if (IntPtr.Size != 8)
+            {
+                keybd_event((byte)vk, 0, 0, new UIntPtr((ulong)MOUSE_MARKER));
+                keybd_event((byte)vk, 0, KEYEVENTF_KEYUP, new UIntPtr((ulong)MOUSE_MARKER));
+                return;
+            }
             var down = new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = (ushort)vk, dwExtraInfo = INJECT_TAG } };
             var up = new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = (ushort)vk, dwFlags = KEYEVENTF_KEYUP, dwExtraInfo = INJECT_TAG } };
             var arr = new[] { down, up };

@@ -184,6 +184,7 @@ namespace PptTouchClick
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            if (_tray != null) return;   // 句柄重建时不要重复挂钩子、重复建托盘
             Native.SetWindowPos(Handle, IntPtr.Zero, -4000, -4000, 1, 1, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
             Program.Log("start pid=" + Process.GetCurrentProcess().Id + " mouseOnly=" + Program.MouseOnly);
 
@@ -449,7 +450,11 @@ namespace PptTouchClick
                                 + " slide=" + st.Key
                                 + " content=" + st.ContentRect
                                 + " shapes=" + (st.PageShapes == null ? "n/a" : st.PageShapes.Count.ToString()));
-                if (switched || changed) ClearTransient();
+                // 换窗口：清掉全部瞬态；只是换页：只清去抖。
+                // 不能连 _marks 一起清——一次触摸常同时产生 pointer + mouse 两路事件，
+                // 清掉标记会让同一击的第二个事件再翻一页。
+                if (switched) ClearTransient();
+                else if (changed) ClearDebounce();
             }
             else if (_lastHwnd != IntPtr.Zero || force)
             {
@@ -479,6 +484,11 @@ namespace PptTouchClick
         private void ClearTransient()
         {
             lock (_qLock) { _marks.Clear(); _debounce.Clear(); }
+        }
+
+        private void ClearDebounce()
+        {
+            lock (_qLock) { _debounce.Clear(); }
         }
 
         private void ProcessClick(RawEvent ev)
@@ -511,15 +521,17 @@ namespace PptTouchClick
             try
             {
                 var before = st.Key;
-                if (!Program.MouseOnly && TouchInjector.Available)
+                // 只在"知道当前页码"时才用触摸注入：否则无法确认是否真的翻页，
+                // 会出现"触摸翻了一页 + PageDown 又翻一页"的双翻。
+                if (!Program.MouseOnly && before.Valid && TouchInjector.Available)
                 {
                     // 先让 PowerPoint 自己按"触摸点击"处理（触摸模式里它就是前进）
                     if (TouchInjector.Tap(st.Handle, p))
                     {
                         if (AdvanceDelayMs > 0) Thread.Sleep(AdvanceDelayMs);
-                        RefreshState(false);
-                        if (_state.Key.Current != before.Current || _state.Key.Count != before.Count)
+                        if (WaitForSlideAdvance(before, 300))
                         {
+                            RefreshState(false);
                             Interlocked.Increment(ref AdvancedCount);
                             Program.Log("advance(touch) " + before + " -> " + _state.Key + " at " + p);
                             return;
@@ -532,6 +544,19 @@ namespace PptTouchClick
                 Program.Log("advance(pagedown) " + before + " at " + p + " src=" + ev.Source);
             }
             finally { _clickRunning = false; }
+        }
+
+        /// <summary>等页码真的变了（原生组件 200ms 刷新一次注册表），避免误判后再补一次 PageDown。</summary>
+        private static bool WaitForSlideAdvance(SlideKey before, int timeoutMs)
+        {
+            var deadline = DateTime.Now.AddMilliseconds(timeoutMs);
+            while (DateTime.Now < deadline)
+            {
+                var k = SlideKey.Read();
+                if (k.Valid && (k.Current != before.Current || k.Count != before.Count)) return true;
+                Thread.Sleep(50);
+            }
+            return false;
         }
 
         internal void Mark(Point p, int budget)

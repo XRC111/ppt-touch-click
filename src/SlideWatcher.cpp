@@ -85,9 +85,16 @@ static void WriteLog(const std::wstring& msg)
     std::lock_guard<std::mutex> lock(LogMutex());
     std::ofstream f(p.c_str(), std::ios::app);
     if (!f.is_open()) return;
+
+    // 注意：这里必须给结尾的 \0 留位置。之前按 len-1 建串却写 len 字节，
+    // 会往 std::string 的缓冲区末尾多写 1 个字节（越界写）。
     int len = WideCharToMultiByte(CP_UTF8, 0, ts, -1, nullptr, 0, nullptr, nullptr);
-    std::string s(len > 0 ? len - 1 : 0, 0);
-    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, ts, -1, &s[0], len, nullptr, nullptr);
+    std::string s(len > 0 ? len : 0, 0);
+    if (len > 0)
+    {
+        WideCharToMultiByte(CP_UTF8, 0, ts, -1, &s[0], len, nullptr, nullptr);
+        s.resize(len - 1);
+    }
     len = WideCharToMultiByte(CP_UTF8, 0, msg.c_str(), (int)msg.size(), nullptr, 0, nullptr, nullptr);
     std::string m(len > 0 ? len : 0, 0);
     if (len > 0) WideCharToMultiByte(CP_UTF8, 0, msg.c_str(), (int)msg.size(), &m[0], len, nullptr, nullptr);
@@ -359,9 +366,24 @@ static LRESULT CALLBACK PointerProc(int code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(g_pHook, code, wParam, lParam);
 }
 
+// 读取用户配置的滑动阈值（C# 端托盘/注册表可改），保持两侧判定一致
+static int ReadMoveTol()
+{
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PptTouchClick", 0, KEY_READ, &k) != ERROR_SUCCESS)
+        return 26;
+    DWORD v = 26, size = sizeof(v), type = 0;
+    if (RegQueryValueExW(k, L"MoveTol", nullptr, &type, reinterpret_cast<BYTE*>(&v), &size) != ERROR_SUCCESS ||
+        type != REG_DWORD || v < 4 || v > 400)
+        v = 26;
+    RegCloseKey(k);
+    return (int)v;
+}
+
 static bool InstallHook()
 {
     if (g_pHook) return true;
+    g_moveTol = ReadMoveTol();
     g_pHook = SetWindowsHookExW(WH_POINTER, PointerProc, GetModuleHandleW(L"PptSlideProc.x64.dll"), 0);
     if (!g_pHook) g_pHook = SetWindowsHookExW(WH_POINTER, PointerProc, GetModuleHandleW(L"PptSlideProc.ocx"), 0);
     if (!g_pHook)
@@ -441,7 +463,9 @@ static void WatchLoop()
     while (g_watchRun.load())
     {
         PublishSlide();
-        for (int i = 0; i < 8 && g_watchRun.load(); ++i)
+        // 200ms 一轮：C# 收到点击后要在 ~300ms 内判断"这一击有没有翻页"，
+        // 轮询太慢（原来 1s）会让判断永远看到旧页码，从而补发 PageDown 造成双翻。
+        for (int i = 0; i < 2 && g_watchRun.load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
