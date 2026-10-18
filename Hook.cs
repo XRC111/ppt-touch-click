@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Windows.Forms;
 
 namespace PptTouchClick
 {
@@ -83,7 +84,8 @@ namespace PptTouchClick
     internal static class SlideSource
     {
         private static readonly object _lock = new object();
-        private static bool _started, _available;
+        private static bool _started;
+        private static volatile bool _available;
         private static Thread _thread;
 
         internal static void Start()
@@ -108,26 +110,34 @@ namespace PptTouchClick
 
         private static void Run()
         {
+            object watcher = null;
             try
             {
                 var type = Type.GetTypeFromProgID("PptTouchClick.SlideWatcher", true);
                 if (type == null) throw new InvalidOperationException("PptSlideProc 未注册");
-                var watcher = Activator.CreateInstance(type);
-                try
-                {
-                    object ok = type.InvokeMember("Start", System.Reflection.BindingFlags.InvokeMethod, null, watcher, null);
-                    if (!(ok is bool) || !(bool)ok) throw new InvalidOperationException("Start() 失败");
-                    _available = true;
-                    object status = type.InvokeMember("GetStatus", System.Reflection.BindingFlags.InvokeMethod, null, watcher, null);
-                    Program.Log("slide-source OK: " + status);
-                    while (true) Thread.Sleep(60000);
-                }
-                finally { Marshal.FinalReleaseComObject(watcher); }
+                watcher = Activator.CreateInstance(type);
+                object ok = type.InvokeMember("Start", System.Reflection.BindingFlags.InvokeMethod, null, watcher, null);
+                if (!(ok is bool) || !(bool)ok) throw new InvalidOperationException("Start() 失败");
+                _available = true;
+                object status = type.InvokeMember("GetStatus", System.Reflection.BindingFlags.InvokeMethod, null, watcher, null);
+                Program.Log("slide-source OK: " + status);
+
+                // 关键：WH_POINTER 是低层钩子，回调由"安装它的线程"的消息循环派发。
+                // 之前这里只 Sleep，钩子虽然装上了却永远收不到事件（超时还会被系统摘掉）。
+                // 用 ApplicationContext 起一个最简消息泵，保住这个 COM 对象和钩子所在的线程。
+                Application.Run(new ApplicationContext());
             }
             catch (Exception ex)
             {
                 _available = false;
                 Program.Log("slide-source unavailable: " + ex.Message);
+            }
+            finally
+            {
+                if (watcher != null)
+                {
+                    try { Marshal.FinalReleaseComObject(watcher); } catch { }
+                }
             }
         }
     }
@@ -204,6 +214,22 @@ namespace PptTouchClick
 
         [DllImport("user32.dll")]
         internal static extern bool IsPenTouchAvailable();
+
+        [DllImport("shcore.dll")]
+        internal static extern int SetProcessDpiAwareness(int value);   // 2 = PerMonitor
+
+        [DllImport("user32.dll")]
+        internal static extern bool SetProcessDPIAware();
+
+        /// <summary>
+        /// 声明 DPI 感知：不声明时钩子的物理像素坐标和窗口矩形（虚拟化坐标）对不上，
+        /// 高缩放下"空白/内容"判定会整体错位。manifest 已声明时这里会失败，无害。
+        /// </summary>
+        internal static void EnableDpiAwareness()
+        {
+            try { if (SetProcessDpiAwareness(2) == 0) return; } catch { }
+            try { SetProcessDPIAware(); } catch { }
+        }
 
         internal static void SendInputKey(int vk)
         {

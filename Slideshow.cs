@@ -111,7 +111,7 @@ namespace PptTouchClick
                 using (var p = System.Diagnostics.Process.GetProcessById((int)pid))
                     return p.ProcessName.Equals("POWERPNT", StringComparison.OrdinalIgnoreCase);
             }
-            catch { return true; }
+            catch { return false; }   // 进程已退出时不要当成 PowerPoint
         }
 
         public static Rectangle ClientScreenRect(IntPtr h)
@@ -203,7 +203,14 @@ namespace PptTouchClick
             bool pageChanged = oldKey.Current != st.Key.Current || oldKey.Count != st.Key.Count;
             if (pageChanged) st.PageShapes = null;
 
-            if (st.ContentRect.IsEmpty || st.PageShapes == null || pageChanged)
+            double since = (DateTime.Now - st.PageShapesTime).TotalMilliseconds;
+            // 拿不到页码（组件没装）时按固定间隔兜底重扫，否则换页后形状会一直停在旧页
+            bool blindRescan = st.Key.Count <= 0 && since >= 900;
+            // 同一页的重复扫描要退避：避免截图失败时每 300ms 反复 PrintWindow
+            bool throttled = since < (pageChanged ? 200 : 900);
+            bool needScan = st.PageShapes == null || st.ContentRect.IsEmpty || pageChanged || blindRescan;
+
+            if (needScan && (!throttled || pageChanged))
                 LoadPageShapes(hwnd, st);
 
             return pageChanged || (st.ContentRect != oldRect);
@@ -212,6 +219,7 @@ namespace PptTouchClick
         /// <summary>扫描一页：确定内容区，得到形状包围盒（屏幕坐标）。一页只做一次。</summary>
         internal static void LoadPageShapes(IntPtr hwnd, SlideshowState st)
         {
+            st.PageShapesTime = DateTime.Now;   // 无论成败都要记时间，失败时才能退避重试
             try
             {
                 using (var bmp = Slideshow.Capture(hwnd))
@@ -232,8 +240,8 @@ namespace PptTouchClick
 
                     st.ContentRect = contentScreen;
                     st.PageShapes = screenShapes;
-                    st.PageShapesTime = DateTime.Now;
-                    Program.Log("page scanned " + st.Key + ": content=" + contentScreen + " shapes=" + screenShapes.Count);
+                    if (Program.Verbose)
+                        Program.Log("page scanned " + st.Key + ": content=" + contentScreen + " shapes=" + screenShapes.Count);
                 }
             }
             catch (Exception ex)
@@ -287,12 +295,12 @@ namespace PptTouchClick
 
                 if (left > 0 && left < w / 10)
                 {
-                    int inner = FindContentColumn(buf, strideI, left, right, top, bottom, +1);
+                    int inner = FindContentColumn(buf, strideI, w, left, right, top, bottom, +1);
                     if (inner > left) left = inner;
                 }
                 if (right < w - 1 && w - 1 - right < w / 10)
                 {
-                    int inner = FindContentColumn(buf, strideI, right, left, top, bottom, -1);
+                    int inner = FindContentColumn(buf, strideI, w, right, left, top, bottom, -1);
                     if (inner >= 0 && inner < right) right = inner;
                 }
                 return Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
@@ -300,12 +308,11 @@ namespace PptTouchClick
             finally { bmp.UnlockBits(data); }
         }
 
-        /// <summary>从 edge 往 dir 找第一条"有内容"的列（≥60% 像素非黑）。</summary>
-        private static int FindContentColumn(int[] buf, int strideI, int edge, int limit, int top, int bottom, int dir)
+        /// <summary>从 edge 往 dir 找第一条"有内容"的列（≥60% 像素非黑），到 limit 为止。</summary>
+        private static int FindContentColumn(int[] buf, int strideI, int width, int edge, int limit, int top, int bottom, int dir)
         {
             int x = edge;
-            int stop = Math.Max(edge, limit);
-            while (x >= 0 && x <= stop)
+            while (x >= 0 && x < width && (dir > 0 ? x <= limit : x >= limit))
             {
                 int bright = 0, total = 0;
                 for (int y = top; y <= bottom; y += 2)

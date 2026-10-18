@@ -11,6 +11,7 @@ namespace PptTouchClick
     {
         private readonly DaemonForm _daemon;
         private readonly NotifyIcon _icon;
+        private readonly Icon _iconImage;
         private readonly ToolStripMenuItem _status;
         private readonly ToolStripMenuItem _toggle;
         private readonly ToolStripMenuItem _autostart;
@@ -45,9 +46,10 @@ namespace PptTouchClick
             menu.Items.Add(_autostart);
             menu.Items.Add(new ToolStripMenuItem("退出", null, (s, e) => _daemon.ExitApp()));
 
+            _iconImage = MakeIcon();   // 只创建一次：每次状态变化重建会泄漏 HICON
             _icon = new NotifyIcon
             {
-                Icon = MakeIcon(),
+                Icon = _iconImage,
                 Text = "PPT 触控单击翻页",
                 Visible = true,
                 ContextMenuStrip = menu
@@ -74,13 +76,22 @@ namespace PptTouchClick
             try
             {
                 _icon.Text = "PPT 触控单击翻页 - " + text;
-                _icon.Icon = MakeIcon();
             }
             catch { }
         }
 
-        /// <summary>工作线程偶尔调用；更新托盘文字即可。</summary>
-        internal void Refresh(bool force) { try { UpdateStatus(force); } catch { } }
+        /// <summary>工作线程调用：切回 UI 线程再改控件，避免跨线程访问。</summary>
+        internal void Refresh(bool force)
+        {
+            try
+            {
+                if (_daemon.IsHandleCreated && _daemon.InvokeRequired)
+                    _daemon.BeginInvoke((Action)(() => UpdateStatus(force)));
+                else
+                    UpdateStatus(force);
+            }
+            catch { }
+        }
 
         private void ShowDetails()
         {
@@ -174,6 +185,7 @@ namespace PptTouchClick
         public void Dispose()
         {
             try { _icon.Visible = false; _icon.Dispose(); } catch { }
+            try { _iconImage.Dispose(); } catch { }
         }
     }
 }

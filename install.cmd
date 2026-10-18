@@ -27,9 +27,16 @@ if not exist "PptTouchClick.exe" (
     exit /b 1
 )
 
-echo [1/5] 注册页码/触摸组件（64 位 + 32 位）...
-regsvr32 /s "%CD%\PptSlideProc.x64.dll"
-regsvr32 /s "%CD%\PptSlideProc.ocx"
+echo [1/5] 注册页码/触摸组件...
+rem 64 位系统只注册 x64 组件（主程序是 64 位）；32 位系统注册 ocx。
+rem 注意：HKCU\Software\Classes\CLSID 不区分 32/64 位，两个都注册会互相覆盖，
+rem 而且 64 位 regsvr32 也加载不了 32 位 DLL。
+if exist "%WINDIR%\SysWOW64\regsvr32.exe" (
+    "%WINDIR%\System32\regsvr32.exe" /s "%CD%\PptSlideProc.x64.dll"
+) else (
+    "%WINDIR%\System32\regsvr32.exe" /s "%CD%\PptSlideProc.ocx"
+)
+if errorlevel 1 echo        （regsvr32 返回错误，详见同目录 PptSlideProc.log）
 
 echo [2/5] 检查注册结果...
 reg query "HKCU\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32" >nul 2>&1

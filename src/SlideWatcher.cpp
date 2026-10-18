@@ -274,11 +274,49 @@ static std::mutex g_touchMu;
 static std::unordered_map<UINT32, TouchRec> g_touch;
 static int g_moveTol = 26;
 
+// 只有"正在全屏放映"时才接管触摸：否则程序一启动就把全系统的滑动/双指缩放/长按吞掉，
+// 浏览器、资源管理器的触摸滚动都会失灵。
+static std::atomic<DWORD> g_activeTick{ 0 };
+static std::atomic<bool> g_activeCached{ false };
+
+static bool IsSlideshowActive()
+{
+    const DWORD now = GetTickCount();
+    const DWORD t = g_activeTick.load();
+    if (t != 0 && (DWORD)(now - t) < 300) return g_activeCached.load();   // 300ms 内复用结果
+
+    bool active = false;
+    HWND fg = GetForegroundWindow();
+    if (fg)
+    {
+        wchar_t cls[64] = {};
+        if (GetClassNameW(fg, cls, 64) > 0 && lstrcmpiW(cls, L"screenClass") == 0)
+        {
+            RECT r = {};
+            if (GetWindowRect(fg, &r))
+            {
+                HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi = {};
+                mi.cbSize = sizeof(mi);
+                if (GetMonitorInfoW(mon, &mi))
+                {
+                    active = (r.right - r.left) >= (mi.rcMonitor.right - mi.rcMonitor.left) - 2 &&
+                             (r.bottom - r.top) >= (mi.rcMonitor.bottom - mi.rcMonitor.top) - 2;
+                }
+            }
+        }
+    }
+    g_activeCached = active;
+    g_activeTick = now;
+    return active;
+}
+
 static LRESULT CALLBACK PointerProc(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code < 0) return CallNextHookEx(g_pHook, code, wParam, lParam);
     const PPTPOINTER_INFO* info = reinterpret_cast<const PPTPOINTER_INFO*>(lParam);
     if (!info || info->pointerType != kPTTouch) return CallNextHookEx(g_pHook, code, wParam, lParam);
+    if (!IsSlideshowActive()) return CallNextHookEx(g_pHook, code, wParam, lParam);
 
     const UINT32 f = info->pointerFlags;
     const UINT32 id = info->pointerId;
@@ -352,6 +390,12 @@ static std::atomic<bool> g_watchRun{ false };
 static std::thread g_watchThread;
 static std::wstring g_lastDetail;
 
+static DWORD g_lastOkTick = 0;        // 上次成功读到页码的时刻
+static DWORD g_lastWriteTick = 0;     // 上次写注册表的时刻（心跳用）
+static DWORD g_lastCurrent = 0xFFFFFFFF;
+static DWORD g_lastCount = 0xFFFFFFFF;
+static bool  g_lastOk = false;
+
 static void PublishSlide()
 {
     int current = -1, count = 0;
@@ -363,17 +407,33 @@ static void PublishSlide()
         WriteLog(L"page: " + detail);
     }
 
+    const DWORD now = GetTickCount();
+    if (ok) g_lastOkTick = now;
+    // AgeMs = 距离上次成功读到页码多久；C# 端据此丢弃过期页码（阈值 15s）。
+    // 从未成功过时给 60s，而不是 0xFFFFFFFF（C# 按 int 读会变成 -1，反而被当成新数据）。
+    DWORD age = ok ? 0 : (g_lastOkTick ? (now - g_lastOkTick) : 60000);
+    if (age > 60000) age = 60000;
+
+    DWORD c = (DWORD)(ok ? current : -1);
+    DWORD n = (DWORD)count;
+
+    // 值没变就不写；每 5 秒补一次心跳，让 AgeMs 能继续增长
+    if (c == g_lastCurrent && n == g_lastCount && ok == g_lastOk && (now - g_lastWriteTick) < 5000)
+        return;
+
     HKEY k = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\PptTouchClick\\Slide", 0, nullptr, 0,
                         KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS)
         return;
-    DWORD c = (DWORD)(ok ? current : -1);
-    DWORD n = (DWORD)count;
-    DWORD age = 0;
     RegSetValueExW(k, L"Current", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&c), sizeof(c));
     RegSetValueExW(k, L"Count", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&n), sizeof(n));
     RegSetValueExW(k, L"AgeMs", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&age), sizeof(age));
     RegCloseKey(k);
+
+    g_lastCurrent = c;
+    g_lastCount = n;
+    g_lastOk = ok;
+    g_lastWriteTick = now;
 }
 
 static void WatchLoop()
@@ -389,10 +449,12 @@ static void WatchLoop()
 // ---------------------------------------------------------------------------
 // 最小 IDispatch：Start() / GetStatus() / Stop()
 // ---------------------------------------------------------------------------
+static std::atomic<long> g_objectCount{ 0 };
+
 class SlideWatcher : public IDispatch
 {
 public:
-    SlideWatcher() : m_ref(1) {}
+    SlideWatcher() : m_ref(1) { ++g_objectCount; }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
     {
@@ -410,7 +472,7 @@ public:
     STDMETHODIMP_(ULONG) Release() override
     {
         ULONG r = --m_ref;
-        if (r == 0) delete this;
+        if (r == 0) { --g_objectCount; delete this; }
         return r;
     }
 
@@ -443,7 +505,7 @@ public:
                 if (g_watchThread.joinable()) g_watchThread.join();
                 g_watchThread = std::thread(WatchLoop);
             }
-            WriteLog(std::wstring(L"Start(): hook=") + (g_hookOk.load() ? L"on" : L"off"));
+            WriteLog(std::wstring(L"PptSlideProc loaded " PPTSLIDEPROC_VERSION L", Start(): hook=") + (g_hookOk.load() ? L"on" : L"off"));
             if (result) { result->vt = VT_BOOL; result->boolVal = VARIANT_TRUE; }
             return S_OK;
         }
@@ -481,7 +543,6 @@ private:
 // 类工厂 / DLL 导出
 // ---------------------------------------------------------------------------
 static LONG g_serverLock = 0;
-static std::atomic<long> g_objectCount{ 0 };
 
 class ClassFactory : public IClassFactory
 {
@@ -512,7 +573,6 @@ public:
         auto* w = new SlideWatcher();
         HRESULT hr = w->QueryInterface(riid, ppv);
         w->Release();
-        if (SUCCEEDED(hr)) ++g_objectCount;
         return hr;
     }
     STDMETHODIMP LockServer(BOOL lock) override
@@ -666,13 +726,8 @@ STDAPI DllUnregisterServer()
 {
     RegDeleteTree(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}");
     RegDeleteTree(HKEY_CURRENT_USER, L"Software\\Classes\\PptTouchClick.SlideWatcher");
-    HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Interface\\{7D2E1B44-03C5-4F88-B172-9E4D1860C29F}",
-                      0, KEY_WRITE, &k) == ERROR_SUCCESS)
-    {
-        RegCloseKey(k);
-        RegDeleteTree(HKEY_CURRENT_USER, L"Software\\Classes\\Interface\\{7D2E1B44-03C5-4F88-B172-9E4D1860C29F}");
-    }
+    // 说明：类型库注册产生的 Interface\{IID} 键由 tlb 里的真实 IID 决定，
+    // 这里不去猜（之前用 LIBID 当 IID 删，删不到任何东西）。
     WriteLog(L"DllUnregisterServer");
     return S_OK;
 }
@@ -715,13 +770,15 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
     {
+        // DllMain 里不做文件 I/O（加载器锁），加载日志放到 Start() 里打
         DisableThreadLibraryCalls(h);
-        WriteLog(L"PptSlideProc loaded " PPTSLIDEPROC_VERSION);
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
+        // 不能 detach 完就让 DLL 卸载：线程可能还在写注册表，会用到已卸载的代码。
+        // WatchLoop 每 100ms 检查一次 g_watchRun，join 最多等约 100ms。
         g_watchRun = false;
-        if (g_watchThread.joinable()) g_watchThread.detach();
+        if (g_watchThread.joinable()) g_watchThread.join();
         if (g_pHook) { UnhookWindowsHookEx(g_pHook); g_pHook = nullptr; }
     }
     return TRUE;
