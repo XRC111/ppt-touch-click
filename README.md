@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=flat-square)](#系统要求)
 [![.NET](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?style=flat-square)](#从源码构建)
-[![License](https://img.shields.io/badge/License-%E4%B8%AA%E4%BA%BA%E8%87%AA%E7%94%A8-lightgrey?style=flat-square)](#许可)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](./LICENSE)
 
 </div>
 
@@ -121,6 +121,6 @@ Windows 10 上的 PowerPoint 会自动判断设备类型：一旦认定是纯触
 
 推送 main 自动构建并发布 Release；也可手动打 tag：`git tag v1.0.0 && git push origin v1.0.0`。
 
-## 许可
+## License
 
-个人/教学用途自用脚本，按现状提供，不做任何担保。
+MIT（见 [LICENSE](./LICENSE)）。本项目按现状提供，不做任何担保。
