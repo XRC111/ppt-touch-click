@@ -9,15 +9,7 @@ echo  PPT 触控单击翻页 - 安装
 echo ============================================================
 echo.
 
-net session >nul 2>&1
-if errorlevel 1 (
-    echo [错误] 需要管理员权限。
-    echo        请右键本文件，选择“以管理员身份运行”。
-    echo.
-    pause
-    exit /b 1
-)
-
+rem 组件注册写的是 HKCU\Software\Classes（按用户），不需要管理员权限。
 if not exist "PptSlideProc.x64.dll" (
     echo [错误] 同目录下找不到 PptSlideProc.x64.dll，请把压缩包完整解压后再运行。
     pause
@@ -29,7 +21,7 @@ if not exist "PptTouchClick.exe" (
     exit /b 1
 )
 
-echo [1/5] 注册页码/触摸组件...
+echo [1/5] 注册页码组件...
 rem 64 位系统只注册 x64 组件（主程序是 64 位）；32 位系统注册 ocx。
 rem 注意：HKCU\Software\Classes\CLSID 不区分 32/64 位，两个都注册会互相覆盖，
 rem 而且 64 位 regsvr32 也加载不了 32 位 DLL。
@@ -38,14 +30,25 @@ if exist "%WINDIR%\SysWOW64\regsvr32.exe" (
 ) else (
     "%WINDIR%\System32\regsvr32.exe" /s "%CD%\PptSlideProc.ocx"
 )
-if errorlevel 1 echo        （regsvr32 返回错误，详见同目录 PptSlideProc.log）
+if errorlevel 1 echo        （regsvr32 返回错误；程序启动时还会自己注册一次，详见 PptSlideProc.log）
 
 echo [2/5] 检查注册结果...
-reg query "HKCU\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32" >nul 2>&1
-if errorlevel 1 (
-    echo        [警告] 组件未注册成功：滑动过滤不可用，但“点击空白翻页”仍然有效。
+set "REGFAIL="
+reg query "HKCU\Software\Classes\PptTouchClick.SlideWatcher\CLSID" >nul 2>&1
+if errorlevel 1 set "REGFAIL=1"
+if not defined REGFAIL (
+    rem 目录被移动过时，旧注册里记的还是旧路径，同样会加载失败
+    for /f "tokens=2,*" %%A in ('reg query "HKCU\Software\Classes\CLSID\{2F4C7A19-8B63-4E21-9A6D-1C3B550E7A21}\InprocServer32" /ve 2^>nul ^| find "REG_SZ"') do set "REGISTERED=%%B"
+)
+if defined REGFAIL (
+    echo        [警告] 组件未注册成功：只能按“页变化后重扫”工作（精度略降），点空白翻页仍有效。
 ) else (
-    echo        组件注册成功。
+    if /i not "%REGISTERED%"=="%CD%\PptSlideProc.x64.dll" (
+        echo        [提示] 注册路径与当前目录不一致：%REGISTERED%
+        echo               程序启动时会自动按当前目录重新注册一次。
+    ) else (
+        echo        组件注册成功。
+    )
 )
 
 echo [3/5] 设置开机自动启动...

@@ -13,9 +13,9 @@
 //     HKCU\Software\PptTouchClick\Slide  {Count, Current, AgeMs}
 //   由 PptTouchClick.exe 读取（C# 端不解析任何二进制）。
 //
-// 为什么要原生：C# 托管进程调 SetWindowsHookEx(WH_POINTER) 时拿不到模块句柄，钩子装不上；
-// 这里用原生代码装全局指针钩子，吞掉"滑动 / 长按"，只放行"点按"，
-// 避免触摸模式下被当成换页手势，也避免误触双指缩放。
+// 为什么用原生：托管代码读不了 PowerPoint 的二进制 MRU/幻灯片段数据，
+// 这里用原生 COM 组件解析并写注册表；滑动/长按过滤在主程序的低层鼠标钩子里完成
+// （Windows 并不存在 WH_POINTER 这样的指针钩子，旧实现因此从未生效）。
 
 #include "SlideWatcher.h"
 
@@ -41,15 +41,6 @@
 
 static const GUID kClsidSlideWatcher = CLSID_SlideWatcher;
 
-// 指针设备钩子常量（WH_POINTER 需要 WinUser.h 中较新的定义，这里显式给出）
-#ifndef WH_POINTER
-#define WH_POINTER 24
-#endif
-static const DWORD kPTTouch = 2;
-static const DWORD kFlagDown = 0x00010000;
-static const DWORD kFlagUpdate = 0x00020000;
-static const DWORD kFlagUp = 0x00040000;
-static const DWORD kFlagCanceled = 0x80000000;
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -263,139 +254,24 @@ static bool ComputeCurrent(int& current, int& count, std::wstring* detail)
 }
 
 // ---------------------------------------------------------------------------
-// 全局指针钩子：吞掉"滑动 / 长按"，只放行"点按"
+// 钩子状态（仅为兼容旧的 GetStatus 字段保留；滑动过滤已移到主程序）
 // ---------------------------------------------------------------------------
 static HHOOK g_pHook = nullptr;
 static std::atomic<bool> g_hookOk{ false };
 static std::atomic<int> g_swallowed{ 0 };
-static std::atomic<bool> g_hookFailed{ false };   // 钩子没装成（通常是没以管理员注册/系统限制）
-
-struct TouchRec
-{
-    DWORD tick;
-    POINT origin;
-    bool swallow;
-};
-
-static std::mutex g_touchMu;
-static std::unordered_map<UINT32, TouchRec> g_touch;
-static int g_moveTol = 26;
-
-// 只有"正在全屏放映"时才接管触摸：否则程序一启动就把全系统的滑动/双指缩放/长按吞掉，
-// 浏览器、资源管理器的触摸滚动都会失灵。
-static std::atomic<DWORD> g_activeTick{ 0 };
-static std::atomic<bool> g_activeCached{ false };
-
-static bool IsSlideshowActive()
-{
-    const DWORD now = GetTickCount();
-    const DWORD t = g_activeTick.load();
-    if (t != 0 && (DWORD)(now - t) < 300) return g_activeCached.load();   // 300ms 内复用结果
-
-    bool active = false;
-    HWND fg = GetForegroundWindow();
-    if (fg)
-    {
-        wchar_t cls[64] = {};
-        if (GetClassNameW(fg, cls, 64) > 0 && lstrcmpiW(cls, L"screenClass") == 0)
-        {
-            RECT r = {};
-            if (GetWindowRect(fg, &r))
-            {
-                HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-                MONITORINFO mi = {};
-                mi.cbSize = sizeof(mi);
-                if (GetMonitorInfoW(mon, &mi))
-                {
-                    active = (r.right - r.left) >= (mi.rcMonitor.right - mi.rcMonitor.left) - 2 &&
-                             (r.bottom - r.top) >= (mi.rcMonitor.bottom - mi.rcMonitor.top) - 2;
-                }
-            }
-        }
-    }
-    g_activeCached = active;
-    g_activeTick = now;
-    return active;
-}
-
-static LRESULT CALLBACK PointerProc(int code, WPARAM wParam, LPARAM lParam)
-{
-    if (code < 0) return CallNextHookEx(g_pHook, code, wParam, lParam);
-    const PPTPOINTER_INFO* info = reinterpret_cast<const PPTPOINTER_INFO*>(lParam);
-    if (!info || info->pointerType != kPTTouch) return CallNextHookEx(g_pHook, code, wParam, lParam);
-    if (!IsSlideshowActive()) return CallNextHookEx(g_pHook, code, wParam, lParam);
-
-    const UINT32 f = info->pointerFlags;
-    const UINT32 id = info->pointerId;
-
-    std::lock_guard<std::mutex> lock(g_touchMu);
-    if (f & kFlagDown)
-    {
-        if (g_touch.size() > 24) g_touch.clear();
-        TouchRec r;
-        r.tick = GetTickCount();
-        r.origin = info->ptPixelLocation;
-        r.swallow = false;
-        g_touch[id] = r;
-        return CallNextHookEx(g_pHook, code, wParam, lParam);
-    }
-    if (f & kFlagCanceled)
-    {
-        g_touch.erase(id);
-        return 1;
-    }
-    auto it = g_touch.find(id);
-    if (it == g_touch.end()) return CallNextHookEx(g_pHook, code, wParam, lParam);
-
-    const LONG dx = info->ptPixelLocation.x - it->second.origin.x;
-    const LONG dy = info->ptPixelLocation.y - it->second.origin.y;
-    if (dx * dx + dy * dy > (LONG)g_moveTol * g_moveTol) it->second.swallow = true;
-
-    if (it->second.swallow)
-    {
-        if (f & kFlagUp) g_touch.erase(id);
-        ++g_swallowed;
-        return 1;
-    }
-    if (f & kFlagUp)
-    {
-        DWORD held = GetTickCount() - it->second.tick;
-        g_touch.erase(id);
-        if (held >= 1500) { ++g_swallowed; return 1; }
-    }
-    return CallNextHookEx(g_pHook, code, wParam, lParam);
-}
-
-// 读取用户配置的滑动阈值（C# 端托盘/注册表可改），保持两侧判定一致
-static int ReadMoveTol()
-{
-    HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\PptTouchClick", 0, KEY_READ, &k) != ERROR_SUCCESS)
-        return 26;
-    DWORD v = 26, size = sizeof(v), type = 0;
-    if (RegQueryValueExW(k, L"MoveTol", nullptr, &type, reinterpret_cast<BYTE*>(&v), &size) != ERROR_SUCCESS ||
-        type != REG_DWORD || v < 4 || v > 400)
-        v = 26;
-    RegCloseKey(k);
-    return (int)v;
-}
+static std::atomic<bool> g_hookFailed{ false };
 
 static bool InstallHook()
 {
-    if (g_pHook) return true;
-    g_moveTol = ReadMoveTol();
-    g_pHook = SetWindowsHookExW(WH_POINTER, PointerProc, GetModuleHandleW(L"PptSlideProc.x64.dll"), 0);
-    if (!g_pHook) g_pHook = SetWindowsHookExW(WH_POINTER, PointerProc, GetModuleHandleW(L"PptSlideProc.ocx"), 0);
-    if (!g_pHook)
-    {
-        g_hookFailed = true;
-        WriteLog(L"SetWindowsHookEx(WH_POINTER) 失败 err=" + std::to_wstring(GetLastError()));
-        return false;
-    }
-    g_hookFailed = false;
-    g_hookOk = true;
-    WriteLog(L"WH_POINTER hook installed");
-    return true;
+    // Windows 并没有公开的"指针钩子"：winuser.h 里 WH_MAX 就是 14，
+    // 钩子 ID 24 不可能成功（SetWindowsHookEx 返回 NULL，GetLastError=1428）。
+    // 旧代码在这里反复尝试并打印"失败"，只会让日志看起来像装上了但收不到事件。
+    // 现在滑动/长按过滤改由主程序的低层鼠标钩子完成（触摸会合成鼠标消息），
+    // 本组件只负责读页码，不再尝试安装钩子。
+    if (!g_hookFailed.exchange(true))
+        WriteLog(L"pointer hook: 系统未提供 WH_POINTER，滑动过滤由主程序处理");
+    g_hookOk = false;
+    return false;
 }
 
 static void RemoveHook()
