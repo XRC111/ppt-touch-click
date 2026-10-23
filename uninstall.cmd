@@ -9,13 +9,7 @@ echo  PPT 触控单击翻页 - 卸载
 echo ============================================================
 echo.
 
-net session >nul 2>&1
-if errorlevel 1 (
-    echo [错误] 需要管理员权限。请右键本文件，选择“以管理员身份运行”。
-    pause
-    exit /b 1
-)
-
+rem 组件注册在 HKCU\Software\Classes（按用户），卸载同样不需要管理员权限。
 echo [1/3] 退出代理...
 taskkill /im PptTouchClick.exe /f >nul 2>&1
 

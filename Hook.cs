@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -64,25 +65,13 @@ namespace PptTouchClick
         public IntPtr dwExtraInfo;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct POINTER_INFO
-    {
-        public uint pointerType, pointerId, frameId, pointerFlags;
-        public IntPtr sourceDevice, hwndTarget;
-        public POINT ptPixelLocation;
-        public POINT ptHimetricLocation;
-        public POINT ptPixelLocationRaw;
-        public POINT ptHimetricLocationRaw;
-        public uint dwTime, historyCount, inputState, dwKeyStates;
-        public ulong PerformanceCount;
-        public int ButtonChangeType;
-    }
-
     internal delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     /// <summary>页码来源：PptSlideProc.ocx（随插件安装的 COM 组件，读 PowerPoint 的"最近访问幻灯片"记录）。</summary>
     internal static class SlideSource
     {
+        private const string ProgId = "PptTouchClick.SlideWatcher";
+
         private static readonly object _lock = new object();
         private static bool _started;
         private static volatile bool _available;
@@ -113,8 +102,7 @@ namespace PptTouchClick
             object watcher = null;
             try
             {
-                var type = Type.GetTypeFromProgID("PptTouchClick.SlideWatcher", true);
-                if (type == null) throw new InvalidOperationException("PptSlideProc 未注册");
+                var type = ResolveType();
                 watcher = Activator.CreateInstance(type);
                 object ok = type.InvokeMember("Start", System.Reflection.BindingFlags.InvokeMethod, null, watcher, null);
                 if (!(ok is bool) || !(bool)ok) throw new InvalidOperationException("Start() 失败");
@@ -122,7 +110,7 @@ namespace PptTouchClick
                 object status = type.InvokeMember("GetStatus", System.Reflection.BindingFlags.InvokeMethod, null, watcher, null);
                 Program.Log("slide-source OK: " + status);
 
-                // 关键：WH_POINTER 是低层钩子，回调由"安装它的线程"的消息循环派发。
+                // 关键：低层钩子的回调由"安装它的线程"的消息循环派发，
                 // 之前这里只 Sleep，钩子虽然装上了却永远收不到事件（超时还会被系统摘掉）。
                 // 用 ApplicationContext 起一个最简消息泵，保住这个 COM 对象和钩子所在的线程。
                 Application.Run(new ApplicationContext());
@@ -140,6 +128,80 @@ namespace PptTouchClick
                 }
             }
         }
+
+        /// <summary>
+        /// 取 ProgID 对应的类型；未注册时就地注册一次。
+        ///
+        /// 背景（issue #3）：只把 zip 解压出来直接运行、没跑 install.cmd 时，
+        /// `Type.GetTypeFromProgID` 会抛 CO_E_CLASSSTRING（0x800401F3，类字符串无效），
+        /// 日志里只有一句"无效的类字符串"，用户无从下手。
+        /// 组件本身由 DllRegisterServer 写 HKCU\Software\Classes，**不需要管理员权限**，
+        /// 所以这里直接调用它做一次按用户注册即可。
+        /// </summary>
+        private static Type ResolveType()
+        {
+            Type type = null;
+            try { type = Type.GetTypeFromProgID(ProgId, false); }
+            catch (Exception ex) { Program.Log("com: ProgID 查询失败 - " + ex.Message); }
+            if (type != null) return type;
+
+            Program.Log("com: 未注册 " + ProgId + "，尝试就地注册");
+            if (TrySelfRegister())
+            {
+                try { type = Type.GetTypeFromProgID(ProgId, false); }
+                catch (Exception ex) { Program.Log("com: 注册后仍无法解析 - " + ex.Message); }
+                if (type != null) { Program.Log("com: 就地注册成功（HKCU）"); return type; }
+            }
+
+            throw new InvalidOperationException(
+                "页码组件不可用（" + ProgId + " 未注册）。请确认 " + ComponentFileName() +
+                " 与 PptTouchClick.exe 在同一目录；仍失败时运行 install.cmd（注册到 HKCU，无需管理员）。");
+        }
+
+        /// <summary>同目录下的原生组件：64 位进程用 .x64.dll，32 位用 .ocx。</summary>
+        private static string ComponentFileName()
+        {
+            return Environment.Is64BitProcess ? "PptSlideProc.x64.dll" : "PptSlideProc.ocx";
+        }
+
+        /// <summary>LoadLibrary + DllRegisterServer（写 HKCU，无需管理员）。</summary>
+        private static bool TrySelfRegister()
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ComponentFileName());
+            if (!File.Exists(path))
+            {
+                Program.Log("com: 找不到组件 " + path);
+                return false;
+            }
+
+            IntPtr module = Native.LoadLibrary(path);
+            if (module == IntPtr.Zero)
+            {
+                // 常见原因：位数不匹配（32 位 exe 加载了 x64 dll）或依赖缺失
+                Program.Log("com: LoadLibrary 失败 err=" + Marshal.GetLastWin32Error() + " path=" + path);
+                return false;
+            }
+            try
+            {
+                IntPtr fn = Native.GetProcAddress(module, "DllRegisterServer");
+                if (fn == IntPtr.Zero)
+                {
+                    Program.Log("com: 组件缺少 DllRegisterServer 导出");
+                    return false;
+                }
+                var register = (Native.DllRegisterServerFn)Marshal.GetDelegateForFunctionPointer(
+                    fn, typeof(Native.DllRegisterServerFn));
+                int hr = register();
+                Program.Log("com: DllRegisterServer hr=0x" + hr.ToString("X8"));
+                return hr >= 0;
+            }
+            catch (Exception ex)
+            {
+                Program.Log("com: 就地注册异常 - " + ex.Message);
+                return false;
+            }
+            finally { Native.FreeLibrary(module); }
+        }
     }
 
     internal static class Native
@@ -149,7 +211,6 @@ namespace PptTouchClick
 
         internal const int WH_MOUSE_LL = 14;
         internal const int WH_KEYBOARD_LL = 13;
-        internal const int WH_POINTER = 24;
 
         internal const int WM_LBUTTONDOWN = 0x0201;
         internal const int WM_LBUTTONUP = 0x0202;
@@ -162,14 +223,14 @@ namespace PptTouchClick
         internal const int WM_SYSKEYDOWN = 0x0104;
         internal const int WM_SYSKEYUP = 0x0105;
 
-        internal const uint PT_TOUCH = 2;
-        internal const uint POINTER_FLAG_NEW = 0x00000001;
-        internal const uint POINTER_FLAG_INRANGE = 0x00000002;
-        internal const uint POINTER_FLAG_INCONTACT = 0x00000004;
-        internal const uint POINTER_FLAG_DOWN = 0x00010000;
-        internal const uint POINTER_FLAG_UPDATE = 0x00020000;
-        internal const uint POINTER_FLAG_UP = 0x00040000;
-        internal const uint POINTER_FLAG_CANCELED = 0x80000000;
+        /// <summary>触摸/笔产生的合成鼠标消息，dwExtraInfo 的高位带这个标记。</summary>
+        internal const uint TOUCH_TAG_MASK = 0xFFFFFF00;
+        internal const uint TOUCH_TAG = 0xFF515700;
+
+        internal const int SM_DIGITIZER = 94;
+        internal const int SM_MAXIMUMTOUCHES = 95;
+        internal const int NID_INTEGRATED_TOUCH = 0x01;
+        internal const int NID_EXTERNAL_TOUCH = 0x02;
 
         internal const int INPUT_MOUSE = 0;
         internal const int INPUT_KEYBOARD = 1;
@@ -216,7 +277,35 @@ namespace PptTouchClick
         internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
         [DllImport("user32.dll")]
-        internal static extern bool IsPenTouchAvailable();
+        internal static extern int GetSystemMetrics(int index);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern IntPtr LoadLibrary(string path);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern bool FreeLibrary(IntPtr module);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        internal static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+        internal delegate int DllRegisterServerFn();
+
+        /// <summary>
+        /// 是否有可用的触摸数字化仪。
+        ///
+        /// 旧实现调用 user32!IsPenTouchAvailable —— 这个导出**并不存在**，
+        /// DllImport 会抛 EntryPointNotFoundException，被 SafePenTouch 吞掉后
+        /// 永远返回 false（issue #3 日志里的 penTouchApi=False 就是这么来的）。
+        /// 正确做法是查 SM_DIGITIZER / SM_MAXIMUMTOUCHES。
+        /// </summary>
+        internal static bool HasTouchDigitizer()
+        {
+            try
+            {
+                int mask = GetSystemMetrics(SM_DIGITIZER);
+                int max = GetSystemMetrics(SM_MAXIMUMTOUCHES);
+                return max > 0 && (mask & (NID_INTEGRATED_TOUCH | NID_EXTERNAL_TOUCH)) != 0;
+            }
+            catch { return false; }
+        }
 
         [DllImport("shcore.dll")]
         internal static extern int SetProcessDpiAwareness(int value);   // 2 = PerMonitor

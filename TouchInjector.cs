@@ -39,8 +39,6 @@ namespace PptTouchClick
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool InjectTouchInput(uint count, POINTER_TOUCH_INFO[] contacts);
         [DllImport("user32.dll")]
-        private static extern bool IsPenTouchAvailable();
-        [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
@@ -52,14 +50,22 @@ namespace PptTouchClick
         // 之前从 100 开始，InjectTouchInput 会以 ERROR_INVALID_PARAMETER 失败。
         private static uint _nextId;
 
-        /// <summary>本机是否支持触摸注入（Win8/10 触摸屏上为 true）。</summary>
+        /// <summary>
+        /// 本机是否支持触摸注入。
+        ///
+        /// 旧实现调用 user32!IsPenTouchAvailable —— 这个导出不存在，
+        /// DllImport 抛 EntryPointNotFoundException 后被 catch 成 false，
+        /// 于是 Available 恒为 false、触摸注入从未生效过（issue #3 的 touchInject=False）。
+        /// 现在按真实条件判断：有触摸数字化仪，且 InitializeTouchInjection 成功。
+        /// </summary>
         internal static bool Available
         {
             get
             {
                 if (_disabled) return false;
-                try { return IsPenTouchAvailable(); }
-                catch { return false; }
+                if (_initialized) return true;
+                if (!Native.HasTouchDigitizer()) return false;
+                return EnsureInit();
             }
         }
 

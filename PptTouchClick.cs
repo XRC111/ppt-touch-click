@@ -109,21 +109,19 @@ namespace PptTouchClick
         public DateTime Until;
     }
 
-    /// <summary>无界面的消息泵窗口：仅用于接收 WH_MOUSE_LL / WH_POINTER / WH_KEYBOARD_LL 回调。</summary>
+    /// <summary>无界面的消息泵窗口：仅用于接收 WH_MOUSE_LL / WH_KEYBOARD_LL 回调。</summary>
     internal sealed class DaemonForm : Form
     {
         private readonly object _qLock = new object();
         private readonly Queue<RawEvent> _queue = new Queue<RawEvent>();
         private readonly AutoResetEvent _signal = new AutoResetEvent(false);
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<int, TouchState> _touches =
-            new System.Collections.Concurrent.ConcurrentDictionary<int, TouchState>();
         private readonly List<Mark> _marks = new List<Mark>();
         private readonly Dictionary<DebounceKey, DateTime> _debounce = new Dictionary<DebounceKey, DateTime>();
 
         private CancellationTokenSource _cts;
         private Thread _worker;
-        private IntPtr _mouseHook, _touchHook, _kbHook;
-        private HookProc _mouseProc, _touchProc, _kbProc;   // 必须持有委托，否则会被 GC
+        private IntPtr _mouseHook, _kbHook;
+        private HookProc _mouseProc, _kbProc;   // 必须持有委托，否则会被 GC
         private Tray _tray;
 
         private SlideshowState _state = new SlideshowState();
@@ -134,6 +132,7 @@ namespace PptTouchClick
         private bool _clickRunning;
         private Point _mouseDownPos;
         private bool _mouseDownSeen;
+        private int _mouseDownTick;
 
         /// <summary>托盘菜单里的"暂停翻页代理"。</summary>
         internal bool Enabled_ = true;
@@ -198,26 +197,19 @@ namespace PptTouchClick
             _kbProc = KeyboardHookProc;
             _kbHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _kbProc, Native.GetModuleHandle(null), 0);
 
-            bool penTouch = SafePenTouch();
-            if (penTouch)
-            {
-                _touchProc = TouchHookProc;
-                _touchHook = Native.SetWindowsHookEx(Native.WH_POINTER, _touchProc, Native.GetModuleHandle(null), 0);
-            }
+            // Windows 没有公开的"指针钩子"：winuser.h 里 WH_MAX 就是 14，
+            // 旧代码用 SetWindowsHookEx(24) 必然失败（日志里的 touch=False 即由此而来）。
+            // 现在改为：触摸单击走鼠标钩子的合成消息（dwExtraInfo 带 0xFF515700 标记），
+            // 滑动/长按在同一处按位移与按住时长过滤。
+            bool hasTouch = Native.HasTouchDigitizer();
             Program.Log("hooks: mouse=" + (_mouseHook != IntPtr.Zero)
                         + " keyboard=" + (_kbHook != IntPtr.Zero)
-                        + " touch=" + (_touchHook != IntPtr.Zero)
-                        + " penTouchApi=" + penTouch
+                        + " touch=" + (hasTouch ? "digitizer" : "none")
                         + " touchInject=" + TouchInjector.Available);
 
             SlideSource.Start();
             RefreshState(true);
             if (_tray != null) _tray.Refresh(true);
-        }
-
-        private static bool SafePenTouch()
-        {
-            try { return Native.IsPenTouchAvailable(); } catch { return false; }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -231,7 +223,6 @@ namespace PptTouchClick
         private void Unhook()
         {
             if (_mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
-            if (_touchHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(_touchHook); _touchHook = IntPtr.Zero; }
             if (_kbHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(_kbHook); _kbHook = IntPtr.Zero; }
         }
 
@@ -259,108 +250,47 @@ namespace PptTouchClick
                 if (ms.dwExtraInfo == Native.INJECT_TAG) return Native.CallNextHookEx(_mouseHook, code, wParam, lParam);
 
                 int msg = wParam.ToInt32();
+
+                // 触摸/笔在 Windows 上会先合成鼠标消息，dwExtraInfo 高位带 0xFF515700。
+                // 这样即使没有（也不存在）WH_POINTER 钩子，也能区分"手指"和真鼠标。
+                bool fromTouch = (ms.dwExtraInfo & Native.TOUCH_TAG_MASK) == Native.TOUCH_TAG;
+
                 if (msg == Native.WM_LBUTTONDOWN)
                 {
                     _mouseDownPos = new Point(ms.ptX, ms.ptY);
                     _mouseDownSeen = true;
+                    _mouseDownTick = Environment.TickCount;
                 }
                 else if (msg == Native.WM_LBUTTONUP)
                 {
                     // 只认左键：右键/中键（例如放映时右键开菜单）不该触发翻页
-                    if (_mouseDownSeen) EnqueueClick(_mouseDownPos, 1, "mouse");
+                    if (_mouseDownSeen)
+                    {
+                        int dx = ms.ptX - _mouseDownPos.X;
+                        int dy = ms.ptY - _mouseDownPos.Y;
+                        double moved = Math.Sqrt((double)dx * dx + (double)dy * dy);
+                        int held = unchecked(Environment.TickCount - _mouseDownTick);
+
+                        if (fromTouch && moved > MoveTol)
+                        {
+                            // 手指滑动（翻页手势/滚动）不该被当成单击
+                            Interlocked.Increment(ref SwallowCount);
+                        }
+                        else if (fromTouch && held >= 0 && held >= TapMs)
+                        {
+                            // 长按（多半是想呼出右键菜单或拖拽）
+                            Interlocked.Increment(ref SwallowCount);
+                        }
+                        else
+                        {
+                            EnqueueClick(_mouseDownPos, 1, fromTouch ? "touch" : "mouse");
+                        }
+                    }
                     _mouseDownSeen = false;
                 }
             }
             catch (Exception ex) { Program.Log("mouse hook: " + ex.Message); }
             return Native.CallNextHookEx(_mouseHook, code, wParam, lParam);
-        }
-
-        // ------------------------------------------------------------------ 触摸钩子
-        /// <summary>只把"单击"交给判定；滑动和长按直接吞掉（避免被当成换页手势，也避免误缩放）。</summary>
-        private IntPtr TouchHookProc(int code, IntPtr wParam, IntPtr lParam)
-        {
-            if (code < 0) return Native.CallNextHookEx(_touchHook, code, wParam, lParam);
-            try
-            {
-                var info = (POINTER_INFO)Marshal.PtrToStructure(lParam, typeof(POINTER_INFO));
-                if (info.pointerType != Native.PT_TOUCH)
-                    return Native.CallNextHookEx(_touchHook, code, wParam, lParam);
-
-                // 只在放映时接管触摸：否则会把全系统的滑动/缩放/长按一起吞掉
-                var cur = _state;
-                if (!Enabled_ || cur == null || !cur.Fullscreen)
-                    return Native.CallNextHookEx(_touchHook, code, wParam, lParam);
-
-                int id = (int)info.pointerId;
-                uint f = info.pointerFlags;
-                bool down = (f & Native.POINTER_FLAG_DOWN) != 0;
-                bool up = (f & Native.POINTER_FLAG_UP) != 0;
-                bool cancel = (f & Native.POINTER_FLAG_CANCELED) != 0;
-                var pt = new Point(info.ptPixelLocation.X, info.ptPixelLocation.Y);
-                IntPtr swallow = new IntPtr(1);
-
-                if (down)
-                {
-                    if (_touches.Count > 24) SweepTouches();
-                    _touches[id] = new TouchState { Tick = Environment.TickCount, Origin = pt };
-                }
-                else if (cancel)
-                {
-                    TouchState dropped;
-                    _touches.TryRemove(id, out dropped);
-                    return swallow;
-                }
-                else
-                {
-                    TouchState s;
-                    if (_touches.TryGetValue(id, out s))
-                    {
-                        int dx = pt.X - s.Origin.X, dy = pt.Y - s.Origin.Y;
-                        if (Math.Sqrt((double)dx * dx + (double)dy * dy) > MoveTol)
-                        {
-                            s.Swallow = true;   // 确定是滑动：这个触点之后的所有事件都吃掉
-                            _touches[id] = s;
-                            return swallow;
-                        }
-                        if (s.Swallow)
-                        {
-                            // 滑动的抬起也要吃掉，并把触点从表里移除，避免状态越积越多
-                            if (up)
-                            {
-                                TouchState dropped0;
-                                _touches.TryRemove(id, out dropped0);
-                            }
-                            return swallow;
-                        }
-                        if (up)
-                        {
-                            long held = unchecked(Environment.TickCount - s.Tick);
-                            TouchState dropped;
-                            _touches.TryRemove(id, out dropped);
-                            if (held < 0 || held < TapMs) EnqueueClick(pt, 1, "touch");
-                            else { Interlocked.Increment(ref SwallowCount); return swallow; }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex) { Program.Log("touch hook: " + ex.Message); }
-            return Native.CallNextHookEx(_touchHook, code, wParam, lParam);
-        }
-
-        private void SweepTouches()
-        {
-            int now = Environment.TickCount;
-            foreach (var kv in _touches.ToArray())
-            {
-                if (unchecked(now - kv.Value.Tick) > 150000) { TouchState dropped; _touches.TryRemove(kv.Key, out dropped); }
-            }
-        }
-
-        private struct TouchState
-        {
-            public int Tick;
-            public Point Origin;
-            public bool Swallow;
         }
 
         // ------------------------------------------------------------------ 键盘钩子
