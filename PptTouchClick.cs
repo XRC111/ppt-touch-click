@@ -253,7 +253,9 @@ namespace PptTouchClick
 
                 // 触摸/笔在 Windows 上会先合成鼠标消息，dwExtraInfo 高位带 0xFF515700。
                 // 这样即使没有（也不存在）WH_POINTER 钩子，也能区分"手指"和真鼠标。
-                bool fromTouch = (ms.dwExtraInfo & Native.TOUCH_TAG_MASK) == Native.TOUCH_TAG;
+                // dwExtraInfo 是 IntPtr：先取整型再按位与非零字节
+                long extra = ms.dwExtraInfo.ToInt64();
+                bool fromTouch = (extra & Native.TOUCH_TAG_MASK) == Native.TOUCH_TAG;
 
                 if (msg == Native.WM_LBUTTONDOWN)
                 {
