@@ -23,6 +23,21 @@ namespace PptTouchClick
         private const uint TOUCH_MASK_PRESSURE = 0x2;
         private const uint MAX_TOUCHES = 10;
 
+        /// <summary>Windows POINTER_INFO（InjectTouchInput 的输入结构首部）。</summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINTER_INFO
+        {
+            public uint pointerType, pointerId, frameId, pointerFlags;
+            public IntPtr sourceDevice, hwndTarget;
+            public POINT ptPixelLocation;
+            public POINT ptHimetricLocation;
+            public POINT ptPixelLocationRaw;
+            public POINT ptHimetricLocationRaw;
+            public uint dwTime, historyCount, inputState, dwKeyStates;
+            public ulong PerformanceCount;
+            public int ButtonChangeType;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct POINTER_TOUCH_INFO
         {
